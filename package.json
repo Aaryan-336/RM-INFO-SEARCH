@@ -1,0 +1,21 @@
+{
+  "name": "rm-intelligence-platform",
+  "version": "1.0.0",
+  "description": "AI-powered RM Intelligence Platform for 360° business profiles",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "libphonenumber-js": "^1.11.18",
+    "puppeteer": "^25.3.0",
+    "selenium-webdriver": "^4.45.0",
+    "tesseract.js": "^5.1.1"
+  }
+}
