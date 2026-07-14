@@ -8,3 +8,6 @@ yarn-debug.log*
 yarn-error.log*
 .system_generated/
 test-*.js
+
+# Puppeteer local browser cache
+.cache/
