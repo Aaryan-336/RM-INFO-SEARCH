@@ -1,13 +1,13 @@
-// Results View — renders all 7 sections per DESIGN.md
+// Results View — ASK Wealth styled with Real Estate Portfolio section
 
 export function renderResultsView(data) {
-  const { query, contacts, person, company, directors, briefing, socialLinks, compliance, engineMeta } = data;
+  const { query, contacts, person, company, directors, briefing, socialLinks, compliance, engineMeta, realEstate } = data;
 
   return `
     <header class="app-header">
       <div class="app-logo">
-        <div class="app-logo-icon">RM</div>
-        RM Intelligence
+        <div class="app-logo-icon">A</div>
+        ASK Intelligence
       </div>
       <div class="api-status">
         <span class="api-status-dot"></span>
@@ -23,7 +23,7 @@ export function renderResultsView(data) {
           <p>${escHtml(query.companyName)}</p>
         </div>
         <div class="results-meta">
-          ${compliance ? `${compliance.compliantFields}/${compliance.totalFields} fields compliant` : ''}
+          ${compliance ? `${compliance.compliantFields}/${compliance.totalFields} fields verified` : ''}
           <br>${new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
         </div>
       </div>
@@ -33,6 +33,7 @@ export function renderResultsView(data) {
       ${renderCompanySection(company, query)}
       ${renderDirectorSection(directors, query)}
       ${renderTimelineSection(person?.experience)}
+      ${renderRealEstateSection(realEstate)}
       ${renderSocialSection(socialLinks)}
       ${renderBriefingSection(briefing)}
     </main>
@@ -283,19 +284,154 @@ function renderDirectorSection(directors, query) {
                 <div>
                   <div class="director-name">${escHtml(d.name || 'Unknown')}</div>
                   <div style="margin-bottom: 8px;">
-                    <span class="badge badge--${isTarget ? 'verified' : 'high'}" style="font-size: 0.7rem; font-weight: 600;">
+                    <span class="badge badge--${isTarget ? 'verified' : 'high'}" style="font-size: 0.68rem; font-weight: 600;">
                       ${escHtml(designation)}
                     </span>
                   </div>
                 </div>
                 <div class="director-detail">
                   ${d.din ? `<div style="font-family: var(--font-mono); font-size: 0.72rem; margin-bottom: 2px;">DIN: ${escHtml(d.din)}</div>` : ''}
-                  ${d.appointmentDate || d.startDate ? `<div style="opacity: 0.8;">Appointed: ${escHtml(d.appointmentDate || d.startDate)}</div>` : ''}
+                  ${d.appointmentDate || d.startDate ? `<div style="opacity: 0.7;">Appointed: ${escHtml(d.appointmentDate || d.startDate)}</div>` : ''}
                   ${d.status && d.status !== 'Active' ? `<div style="color: var(--error); font-weight: 500;">Status: ${escHtml(d.status)}</div>` : ''}
                 </div>
               </div>
             `;
           }).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ── Section: Real Estate Portfolio ───────────────────────
+
+function renderRealEstateSection(realEstate) {
+  if (!realEstate || !realEstate.properties || realEstate.properties.length === 0) {
+    return `
+      <div class="section-card">
+        <div class="section-card-header">
+          <span class="section-icon">🏠</span>
+          <h3>Real Estate Portfolio</h3>
+        </div>
+        <div class="section-card-body">
+          <div class="no-data">
+            <div class="no-data-icon">🏗️</div>
+            No property registrations found in IGR Maharashtra records.
+            <br><small style="color: var(--primary-dim); margin-top: 4px; display: block;">Coverage: Mumbai City, Mumbai Suburban, Thane, Pune</small>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  const { properties, summary } = realEstate;
+
+  // Build summary stats
+  const summaryHtml = `
+    <div class="realestate-summary">
+      <div class="realestate-stat">
+        <div class="realestate-stat-value">${summary.totalProperties}</div>
+        <div class="realestate-stat-label">Properties Found</div>
+      </div>
+      ${summary.districts?.length > 0 ? `
+        <div class="realestate-stat">
+          <div class="realestate-stat-value">${summary.districts.length}</div>
+          <div class="realestate-stat-label">Districts</div>
+        </div>
+      ` : ''}
+      ${summary.estimatedPortfolioValue ? `
+        <div class="realestate-stat">
+          <div class="realestate-stat-value">₹${formatCurrency(summary.estimatedPortfolioValue)}</div>
+          <div class="realestate-stat-label">Portfolio Value</div>
+        </div>
+      ` : ''}
+      ${Object.keys(summary.documentTypes || {}).length > 0 ? `
+        <div class="realestate-stat">
+          <div class="realestate-stat-value">${Object.keys(summary.documentTypes).length}</div>
+          <div class="realestate-stat-label">Document Types</div>
+        </div>
+      ` : ''}
+    </div>
+  `;
+
+  // Render property cards
+  const propertyCards = properties.slice(0, 15).map(prop => {
+    if (prop.type === 'unstructured') {
+      return `
+        <div class="property-card">
+          <div class="property-card-header">
+            <span class="property-type-badge">📄 Record</span>
+            <span class="property-date">${escHtml(prop.district || '')}</span>
+          </div>
+          <p style="font-size: 0.8rem; color: var(--primary-muted); line-height: 1.5;">${escHtml((prop.rawText || '').substring(0, 300))}${prop.rawText?.length > 300 ? '...' : ''}</p>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="property-card">
+        <div class="property-card-header">
+          <span class="property-type-badge">🏠 ${escHtml(prop.articleName || prop.type || 'Transaction')}</span>
+          <span class="property-date">${escHtml(prop.registrationDate || prop.executionDate || '')}</span>
+        </div>
+        <div class="property-details">
+          ${prop.documentNo ? `
+            <div class="property-detail-item">
+              <div class="property-detail-label">Document No</div>
+              <div class="property-detail-value" style="font-family: var(--font-mono); font-size: 0.82rem;">${escHtml(prop.documentNo)}</div>
+            </div>
+          ` : ''}
+          ${prop.sroName ? `
+            <div class="property-detail-item">
+              <div class="property-detail-label">SRO / District</div>
+              <div class="property-detail-value">${escHtml(prop.sroName)}</div>
+            </div>
+          ` : ''}
+          ${prop.propertyDescription ? `
+            <div class="property-detail-item" style="grid-column: span 2;">
+              <div class="property-detail-label">Property</div>
+              <div class="property-detail-value">${escHtml(prop.propertyDescription.substring(0, 150))}</div>
+            </div>
+          ` : ''}
+          ${prop.considerationAmount ? `
+            <div class="property-detail-item">
+              <div class="property-detail-label">Consideration</div>
+              <div class="property-detail-value property-amount">₹${escHtml(prop.considerationAmount)}</div>
+            </div>
+          ` : ''}
+          ${prop.marketValue ? `
+            <div class="property-detail-item">
+              <div class="property-detail-label">Market Value</div>
+              <div class="property-detail-value property-amount">₹${escHtml(prop.marketValue)}</div>
+            </div>
+          ` : ''}
+          ${prop.partyNames ? `
+            <div class="property-detail-item" style="grid-column: span 2;">
+              <div class="property-detail-label">Parties</div>
+              <div class="property-detail-value">${escHtml(prop.partyNames.substring(0, 200))}</div>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="section-card">
+      <div class="section-card-header">
+        <span class="section-icon">🏠</span>
+        <h3>Real Estate Portfolio</h3>
+      </div>
+      <div class="section-card-body">
+        ${summaryHtml}
+        <div class="realestate-grid">
+          ${propertyCards}
+        </div>
+        <div class="data-row" style="margin-top: var(--space-md)">
+          <span class="data-label">Source</span>
+          <span class="data-value">
+            <span class="source-pill">${escHtml(realEstate.source || 'IGR Maharashtra')}</span>
+          </span>
         </div>
       </div>
     </div>
@@ -421,4 +557,12 @@ function escHtml(str) {
 
 function escAttr(str) {
   return escHtml(str);
+}
+
+function formatCurrency(amount) {
+  if (!amount || isNaN(amount)) return '0';
+  if (amount >= 10000000) return (amount / 10000000).toFixed(1) + ' Cr';
+  if (amount >= 100000) return (amount / 100000).toFixed(1) + ' L';
+  if (amount >= 1000) return (amount / 1000).toFixed(0) + 'K';
+  return amount.toString();
 }

@@ -1,5 +1,5 @@
 // Pipeline Orchestrator
-// Runs the 8-stage intelligence pipeline sequentially, streaming logs via callback
+// Runs the 9-stage intelligence pipeline sequentially, streaming logs via callback
 
 import { resolveIdentity } from './identity.js';
 import { publicSearch } from './publicSearch.js';
@@ -9,6 +9,7 @@ import { enrichContacts } from './enrichment.js';
 import { validateContacts } from './validation.js';
 import { runComplianceChecks } from './compliance.js';
 import { generateBriefing } from './briefing.js';
+import { scrapeIGRProperties } from './igrScraper.js';
 import { createLogger, STAGES } from '../utils/logger.js';
 
 export async function runPipeline(personName, companyName, linkedinUrl, onLog) {
@@ -25,6 +26,7 @@ export async function runPipeline(personName, companyName, linkedinUrl, onLog) {
     briefing: null,
     socialLinks: [],
     compliance: null,
+    realEstate: null,
     engineMeta: {
       stages: STAGES,
       totalStages: STAGES.length,
@@ -154,6 +156,15 @@ export async function runPipeline(personName, companyName, linkedinUrl, onLog) {
     // ── Stage 8: AI Briefing ────────────────────────────────
     const briefing = await generateBriefing(identity, validated, mcaData, allProfiles, logger);
     result.briefing = briefing;
+
+    // ── Stage 9: Real Estate Intelligence ───────────────────
+    // Only run if identity has been resolved (person name confirmed)
+    if (identity && identity.person) {
+      const realEstateData = await scrapeIGRProperties(identity, logger);
+      result.realEstate = realEstateData;
+    } else {
+      logger.skipped('Real Estate Intelligence', 'Identity not resolved — skipping IGR search');
+    }
 
   } catch (err) {
     logger.error('Pipeline', `Fatal error: ${err.message}`);

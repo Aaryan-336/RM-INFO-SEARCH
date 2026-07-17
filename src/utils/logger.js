@@ -36,4 +36,5 @@ export const STAGES = [
   'Validation',
   'Compliance',
   'AI Briefing',
+  'Real Estate Intelligence',
 ];

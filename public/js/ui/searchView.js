@@ -1,11 +1,11 @@
-// Search View — clean centered card with Person Name + Company Name inputs
+// Search View — ASK Wealth inspired premium dark search interface
 
 export function renderSearchView() {
   return `
     <header class="app-header">
       <div class="app-logo">
-        <div class="app-logo-icon">RM</div>
-        RM Intelligence
+        <div class="app-logo-icon">A</div>
+        ASK Intelligence
       </div>
       <div class="api-status">
         <span class="api-status-dot"></span>
@@ -15,8 +15,9 @@ export function renderSearchView() {
 
     <main class="search-view">
       <div class="search-hero">
-        <h1>Intelligence Platform</h1>
-        <p>Generate a verified 360° business profile from public records, corporate filings, and enrichment sources.</p>
+        <h1>Led by <span class="accent-text">foresight</span><br>realized by expertise</h1>
+        <div class="search-divider"></div>
+        <p>Generate a verified 360° business profile from public records, corporate filings, real estate registrations, and enrichment sources.</p>
       </div>
 
       <form class="search-card" id="search-form">
@@ -45,7 +46,7 @@ export function renderSearchView() {
         </div>
 
         <div class="search-field">
-          <label for="linkedin-url">LinkedIn Profile URL <span style="opacity:0.5; font-weight:400">(optional)</span></label>
+          <label for="linkedin-url">LinkedIn Profile URL <span style="opacity:0.4; font-weight:400; letter-spacing:0">(optional)</span></label>
           <input 
             type="url" 
             id="linkedin-url" 
@@ -60,7 +61,7 @@ export function renderSearchView() {
         </button>
 
         <div class="search-footer">
-          Sources: MCA Records · Company Websites · LinkedIn · Public Documents · Enrichment APIs
+          MCA Records · LinkedIn · Company Websites · IGR Maharashtra · Enrichment APIs
         </div>
       </form>
     </main>

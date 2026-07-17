@@ -42,11 +42,11 @@ class App {
     return `
       <header class="app-header">
         <div class="app-logo">
-          <div class="app-logo-icon">RM</div>
-          RM Intelligence
+          <div class="app-logo-icon">A</div>
+          ASK Intelligence
         </div>
         <div class="api-status">
-          <span class="api-status-dot" style="background:#eab308"></span>
+          <span class="api-status-dot" style="background: var(--warning)"></span>
           Processing
         </div>
       </header>

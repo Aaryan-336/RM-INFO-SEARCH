@@ -1,4 +1,4 @@
-// Engine Panel — real-time log display with SSE integration
+// Engine Panel — ASK Wealth styled real-time log display
 
 const STAGE_ORDER = [
   'Identity Resolution',
@@ -9,6 +9,7 @@ const STAGE_ORDER = [
   'Validation',
   'Compliance',
   'AI Briefing',
+  'Real Estate Intelligence',
 ];
 
 const STATUS_ICONS = {
