@@ -17,6 +17,14 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason, promise) => {
   console.error('[UNHANDLED REJECTION]', reason);
 });
+process.on('SIGTERM', () => {
+  console.log('[SIGTERM] Exiting process...');
+  process.exit(0);
+});
+process.on('SIGINT', () => {
+  console.log('[SIGINT] Exiting process...');
+  process.exit(0);
+});
 
 
 app.use(express.json());
