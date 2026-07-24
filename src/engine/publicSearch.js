@@ -412,153 +412,20 @@ async function duckDuckGoSearch(page, identity, results, allSnippets, logger) {
 // Strategy 4: HTTP fetch (no Puppeteer needed — avoids JS redirect to login)
 
 async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
-  // Priority 1: Use user-provided LinkedIn URL (skip search entirely)
-  let linkedinUrl = identity.linkedinUrl || null;
-
-  if (linkedinUrl) {
-    logger.success('Public Search', `LinkedIn: Using provided URL — ${linkedinUrl}`);
-    results.socialLinks.push({ platform: 'LinkedIn', url: linkedinUrl, source: 'User Input' });
-  }
-
-  // Priority 2: Check if DDG search already found one
-  if (!linkedinUrl) {
-    linkedinUrl = results.socialLinks.find(l => l.platform === 'LinkedIn')?.url;
-  }
+  // Discover LinkedIn profile URL via multi-engine search cascade
+  let linkedinUrl = await discoverLinkedInProfileUrl(page, identity, results, allSnippets, logger);
 
   if (!linkedinUrl) {
-    // Search specifically for LinkedIn profile with fuzzy company keywords
-    try {
-      const seenWords = new Set();
-      const uniqueCoreWords = (identity.company.coreWords || [])
-        .filter(w => {
-          const lower = w.toLowerCase();
-          if (seenWords.has(lower)) return false;
-          seenWords.add(lower);
-          return true;
-        });
-
-      const primaryTerm = identity.company.officialName
-        ? identity.company.officialName.replace(/\b(private|limited|llp|pvt|ltd|inc|corp|corporation|co|company|india)\b/gi, '').trim()
-        : identity.company.normalized;
-
-      let query = `site:linkedin.com/in "${identity.normalized.fullName}" "${primaryTerm}"`;
-      logger.running('Public Search', `LinkedIn: Querying DDG for: ${query}`);
-      
-      await page.goto(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
-        waitUntil: 'domcontentloaded',
-        timeout: 10000,
-      });
-      await page.waitForSelector('a.result__a', { timeout: 5000 }).catch(() => {});
-
-      const parseResults = async () => {
-        return await page.evaluate(() => {
-          return Array.from(document.querySelectorAll('.result__body')).map(el => {
-            const anchor = el.querySelector('a.result__a');
-            const snippet = el.querySelector('.result__snippet');
-            let href = anchor?.getAttribute('href') || '';
-            
-            // Decode DDG redirect
-            if (href.includes('uddg=')) {
-              try {
-                const match = href.match(/uddg=([^&]+)/);
-                if (match) href = decodeURIComponent(match[1]);
-              } catch (e) {}
-            }
-            if (href.startsWith('//')) href = 'https:' + href;
-            
-            return {
-              url: href,
-              title: anchor?.textContent?.trim() || '',
-              snippet: snippet?.textContent?.trim() || '',
-            };
-          }).filter(r => r.url.includes('linkedin.com/in/'));
-        });
-      };
-
-      let ddgResults = await parseResults();
-
-      // Fallback: if strict search returned nothing, try with loose core words
-      if (ddgResults.length === 0 && uniqueCoreWords.length > 0) {
-        const looseTerm = uniqueCoreWords.slice(0, 3).join(' ');
-        query = `site:linkedin.com/in "${identity.normalized.fullName}" ${looseTerm}`;
-        logger.running('Public Search', `LinkedIn: Strict query yielded no profiles. Trying fallback: ${query}`);
-        
-        await page.goto(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
-          waitUntil: 'domcontentloaded',
-          timeout: 10000,
-        });
-        await page.waitForSelector('a.result__a', { timeout: 5000 }).catch(() => {});
-        ddgResults = await parseResults();
-      }
-
-      if (ddgResults.length > 0) {
-        let verifiedLinkedinUrl = null;
-        for (const r of ddgResults.slice(0, 3)) {
-          logger.running('Public Search', `Verifying candidate LinkedIn profile match: ${r.url}`);
-          const isMatch = await verifyLinkedInProfileMatch(r, identity, logger);
-          if (isMatch) {
-            verifiedLinkedinUrl = r.url;
-            logger.success('Public Search', `Verified LinkedIn profile matches target person: ${r.url}`);
-            results.socialLinks.push({ platform: 'LinkedIn', url: verifiedLinkedinUrl, source: 'DuckDuckGo Search (AI Verified)' });
-            linkedinUrl = verifiedLinkedinUrl;
-            break;
-          }
-        }
-
-        if (!linkedinUrl) {
-          logger.warning('Public Search', `Could not find a verified LinkedIn profile match in search results`);
-        }
-
-        // ── Strategy 3: Parse experience from DDG result titles ──
-        // DDG titles for LinkedIn follow: "Name - Role at Company | LinkedIn"
-        // or: "Name - Role | Company | LinkedIn"
-        for (const r of ddgResults) {
-          allSnippets.push({ title: r.title, href: r.url, snippet: r.snippet });
-          const parsed = parseLinkedInTitle(r.title, identity);
-          if (parsed) {
-            if (parsed.role) {
-              results.roles.push({
-                value: parsed.role,
-                source: r.url,
-                sourceType: 'LinkedIn (DuckDuckGo Title)',
-                confidence: CONFIDENCE.PUBLIC_DIRECTORY,
-                timestamp: new Date().toISOString(),
-              });
-            }
-            if (parsed.role && parsed.company) {
-              if (!results.experience.some(exp =>
-                exp.company?.toLowerCase() === parsed.company.toLowerCase() &&
-                exp.title?.toLowerCase() === parsed.role.toLowerCase()
-              )) {
-                results.experience.push({
-                  title: parsed.role,
-                  company: parsed.company,
-                  duration: 'Current / Recent',
-                  source: 'LinkedIn (DuckDuckGo Title)',
-                  confidence: CONFIDENCE.PUBLIC_DIRECTORY,
-                  timestamp: new Date().toISOString(),
-                });
-              }
-            }
-          }
-
-          // Also extract from snippet
-          if (r.snippet) {
-            extractFromText(r.snippet, r.url, identity, results);
-          }
-        }
-
-        logger.success('Public Search', `LinkedIn: Parsed ${ddgResults.length} search result(s) for roles/experience`);
-      }
-    } catch (e) {
-      // Skip DDG search
-    }
-  }
-
-  if (!linkedinUrl) {
-    logger.skipped('Public Search', 'LinkedIn: No profile URL found');
+    logger.skipped('Public Search', 'LinkedIn: No verified profile URL found');
     return;
   }
+
+  // Ensure results store the confirmed profile URL
+  results.linkedinProfile = linkedinUrl;
+  results.pagesSearched.push(linkedinUrl);
+
+  // ── Strategy 1 & 2: Load LinkedIn page and extract structured data (JSON-LD + meta tags) ──
+  logger.running('Public Search', `LinkedIn: Loading profile ${linkedinUrl}...`);
 
   // ── Strategy 1 & 2: Load LinkedIn page and extract structured data (JSON-LD + meta tags) ──
   logger.running('Public Search', 'LinkedIn: Extracting structured data (JSON-LD + meta tags)...');
@@ -1453,43 +1320,54 @@ Respond with ONLY this JSON:
 // ─── AI Identity & Profile Matching ───────────────────────
 
 async function verifyLinkedInProfileMatch(candidate, identity, logger) {
+  const titleLower = candidate.title ? candidate.title.toLowerCase() : '';
+  const snippetLower = candidate.snippet ? candidate.snippet.toLowerCase() : '';
+  const urlLower = candidate.url ? candidate.url.toLowerCase() : '';
+  const firstName = identity.normalized.firstName.toLowerCase();
+  const lastName = identity.normalized.lastName.toLowerCase();
+  const companyWords = identity.company.coreWords || [];
+
+  // Check if URL or title matches target person's name
+  const nameMatch = (firstName && urlLower.includes(firstName)) || (lastName && urlLower.includes(lastName)) ||
+                    (firstName && titleLower.includes(firstName)) || (lastName && titleLower.includes(lastName));
+
+  // Targeted search results with matching name are accepted
+  if (candidate.isTargetedSearch && nameMatch) {
+    return true;
+  }
+
   const prompt = `You are a precise professional identity verification engine.
-Our target person is:
-- Name: ${identity.normalized.fullName}
-- Company: ${identity.company.normalized}
-- Company Aliases: ${identity.company.variants?.slice(0, 5).join(', ') || 'None'}
-
-We found a candidate LinkedIn profile:
+Target Person: "${identity.normalized.fullName}" working at "${identity.company.normalized}".
+Candidate Profile:
 - URL: ${candidate.url}
-- Title: ${candidate.title}
-- Snippet: ${candidate.snippet}
+- Title: ${candidate.title || 'N/A'}
+- Snippet: ${candidate.snippet || 'N/A'}
 
-Verify if this profile represents the EXACT same person.
+Verify if this candidate LinkedIn profile represents "${identity.normalized.fullName}".
 Rules:
 - The candidate's name must match our target's name (allow middle names, initials, spelling variations).
-- The candidate must have some current or past association with the target company or its core words/aliases.
-- If the candidate works in an completely unrelated company, location, or industry with no connection to the target, they are a DIFFERENT person.
+- The candidate should have some current or past association with the target company or industry.
+- If the target company is not explicitly mentioned, but the name matches and location/role is compatible, accept it.
 
-Generate a JSON response with exactly this structure:
+Respond ONLY with this JSON:
 {
   "matches": true,
-  "confidence": 0.95,
-  "reason": "Explain briefly why they match or mismatch"
-}
-Return ONLY the JSON object, no markdown formatting.`;
+  "confidence": 0.90,
+  "reason": "Brief reason"
+}`;
 
   if (process.env.GROQ_API_KEY) {
     try {
       const responseText = await callGroqWithFallback(
-        'You are an identity verification engine. Return valid JSON only.',
+        'Identity verification engine. Return valid JSON only.',
         prompt,
-        { timeout: 8000, temperature: 0.1, stage: 'Public Search' },
+        { timeout: 7000, temperature: 0.1, stage: 'Public Search' },
         logger
       );
       const res = JSON.parse(responseText);
-      return res.matches && res.confidence >= 0.85;
+      if (res.matches && res.confidence >= 0.60) return true;
     } catch (e) {
-      logger.warning('Public Search', `Groq identity matching failed: ${e.message}. Trying Gemini...`);
+      logger.warning('Public Search', `Groq identity matching failed: ${e.message}`);
     }
   }
 
@@ -1504,20 +1382,256 @@ Return ONLY the JSON object, no markdown formatting.`;
       const match = text.match(/\{[\s\S]*\}/);
       if (match) {
         const res = JSON.parse(match[0]);
-        return res.matches && res.confidence >= 0.85;
+        if (res.matches && res.confidence >= 0.60) return true;
       }
     } catch (e) {
       logger.warning('Public Search', `Gemini identity matching fallback failed: ${e.message}`);
     }
   }
 
-  // Fallback to basic string matching if API keys fail
-  const titleLower = candidate.title.toLowerCase();
-  const snippetLower = candidate.snippet.toLowerCase();
-  const companyWords = identity.company.coreWords || [];
-  
+  // Fallback heuristic: check if name matches AND company word or targeted query
   const hasCompanyWord = companyWords.some(w => titleLower.includes(w.toLowerCase()) || snippetLower.includes(w.toLowerCase()));
-  return hasCompanyWord;
+  if (nameMatch && (hasCompanyWord || candidate.isTargetedSearch)) {
+    return true;
+  }
+
+  return false;
+}
+
+// ─── Multi-Engine LinkedIn Profile URL Discovery ─────────────────
+
+async function discoverLinkedInProfileUrl(page, identity, results, allSnippets, logger) {
+  // 1. Check user-provided URL
+  if (identity.linkedinUrl) {
+    const norm = normalizeLinkedInUrl(identity.linkedinUrl);
+    logger.success('Public Search', `LinkedIn: Using user-provided URL — ${norm || identity.linkedinUrl}`);
+    if (norm && !results.socialLinks.some(s => s.url === norm)) {
+      results.socialLinks.push({ platform: 'LinkedIn', url: norm, source: 'User Input' });
+    }
+    return norm || identity.linkedinUrl;
+  }
+
+  // 2. Check existing socialLinks
+  const existing = results.socialLinks.find(l => l.platform === 'LinkedIn')?.url;
+  if (existing) {
+    const norm = normalizeLinkedInUrl(existing);
+    if (norm) return norm;
+  }
+
+  // 3. Check already-collected search snippets for any LinkedIn URLs
+  for (const snip of allSnippets) {
+    if (snip.href && snip.href.includes('linkedin.com/in/')) {
+      const norm = normalizeLinkedInUrl(snip.href);
+      if (norm) {
+        const isMatch = await verifyLinkedInProfileMatch({ url: norm, title: snip.title, snippet: snip.snippet, isTargetedSearch: false }, identity, logger);
+        if (isMatch) {
+          logger.success('Public Search', `LinkedIn: Discovered profile URL from web search snippets — ${norm}`);
+          results.socialLinks.push({ platform: 'LinkedIn', url: norm, source: 'Web Search Snippet' });
+          return norm;
+        }
+      }
+    }
+  }
+
+  const fullName = identity.normalized.fullName;
+  const companyTerm = identity.company.officialName
+    ? identity.company.officialName.replace(/\b(private|limited|llp|pvt|ltd|inc|corp|corporation|co|company|india)\b/gi, '').trim()
+    : identity.company.normalized;
+
+  const candidateList = [];
+
+  // Search Engine 1: Google Search (most reliable for LinkedIn profile URLs)
+  try {
+    const googleQuery = `site:linkedin.com/in "${fullName}" "${companyTerm}"`;
+    logger.running('Public Search', `LinkedIn Discovery (Google): ${googleQuery}`);
+    
+    await page.goto(`https://www.google.com/search?q=${encodeURIComponent(googleQuery)}&num=5&hl=en`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 10000,
+    });
+    await new Promise(r => setTimeout(r, 1200));
+
+    const googleResults = await page.evaluate(() => {
+      const items = [];
+      document.querySelectorAll('div.g, div[data-sokoban-container], a[href*="linkedin.com/in/"]').forEach(el => {
+        const anchor = el.tagName === 'A' ? el : el.querySelector('a[href*="linkedin.com/in/"]');
+        const titleEl = el.querySelector ? el.querySelector('h3') : null;
+        const snippetEl = el.querySelector ? el.querySelector('div[data-sncf], div.VwiC3b, span.aCOpRe') : null;
+        
+        let href = anchor ? anchor.href : '';
+        if (href.includes('linkedin.com/in/')) {
+          items.push({
+            url: href,
+            title: titleEl ? titleEl.textContent.trim() : (anchor ? anchor.textContent.trim() : ''),
+            snippet: snippetEl ? snippetEl.textContent.trim() : '',
+            isTargetedSearch: true,
+          });
+        }
+      });
+      return items;
+    });
+
+    if (googleResults.length > 0) {
+      logger.success('Public Search', `Google: Found ${googleResults.length} candidate LinkedIn URL(s)`);
+      candidateList.push(...googleResults);
+    }
+  } catch (err) {
+    logger.warning('Public Search', `Google LinkedIn discovery failed: ${err.message}`);
+  }
+
+  // Search Engine 2: DuckDuckGo HTML Search
+  if (candidateList.length === 0) {
+    try {
+      const ddgQuery = `site:linkedin.com/in "${fullName}" "${companyTerm}"`;
+      logger.running('Public Search', `LinkedIn Discovery (DuckDuckGo): ${ddgQuery}`);
+
+      await page.goto(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(ddgQuery)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 10000,
+      });
+      await new Promise(r => setTimeout(r, 1000));
+
+      const ddgResults = await page.evaluate(() => {
+        const items = [];
+        document.querySelectorAll('.result__body').forEach(el => {
+          const anchor = el.querySelector('a.result__a');
+          const snippet = el.querySelector('.result__snippet');
+          let href = anchor ? anchor.getAttribute('href') || '' : '';
+          
+          if (href.includes('uddg=')) {
+            try {
+              const match = href.match(/uddg=([^&]+)/);
+              if (match) href = decodeURIComponent(match[1]);
+            } catch (e) {}
+          }
+          if (href.startsWith('//')) href = 'https:' + href;
+
+          if (href.includes('linkedin.com/in/')) {
+            items.push({
+              url: href,
+              title: anchor ? anchor.textContent.trim() : '',
+              snippet: snippet ? snippet.textContent.trim() : '',
+              isTargetedSearch: true,
+            });
+          }
+        });
+        return items;
+      });
+
+      if (ddgResults.length > 0) {
+        logger.success('Public Search', `DuckDuckGo: Found ${ddgResults.length} candidate LinkedIn URL(s)`);
+        candidateList.push(...ddgResults);
+      }
+    } catch (err) {
+      logger.warning('Public Search', `DuckDuckGo LinkedIn discovery failed: ${err.message}`);
+    }
+  }
+
+  // Search Engine 3: Bing Search
+  if (candidateList.length === 0) {
+    try {
+      const bingQuery = `site:linkedin.com/in "${fullName}" "${companyTerm}"`;
+      logger.running('Public Search', `LinkedIn Discovery (Bing): ${bingQuery}`);
+
+      await page.goto(`https://www.bing.com/search?q=${encodeURIComponent(bingQuery)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 10000,
+      });
+      await new Promise(r => setTimeout(r, 1000));
+
+      const bingResults = await page.evaluate(() => {
+        const items = [];
+        document.querySelectorAll('li.b_algo, a[href*="linkedin.com/in/"]').forEach(el => {
+          const anchor = el.tagName === 'A' ? el : el.querySelector('h2 a');
+          const snippet = el.querySelector ? el.querySelector('.b_caption p') : null;
+          const href = anchor ? anchor.getAttribute('href') || '' : '';
+          if (href.includes('linkedin.com/in/')) {
+            items.push({
+              url: href,
+              title: anchor ? anchor.textContent.trim() : '',
+              snippet: snippet ? snippet.textContent.trim() : '',
+              isTargetedSearch: true,
+            });
+          }
+        });
+        return items;
+      });
+
+      if (bingResults.length > 0) {
+        logger.success('Public Search', `Bing: Found ${bingResults.length} candidate LinkedIn URL(s)`);
+        candidateList.push(...bingResults);
+      }
+    } catch (err) {
+      logger.warning('Public Search', `Bing LinkedIn discovery failed: ${err.message}`);
+    }
+  }
+
+  // Search Engine 4: Broad name-only fallback (without company term if strict searches failed)
+  if (candidateList.length === 0) {
+    try {
+      const broadQuery = `site:linkedin.com/in "${fullName}"`;
+      logger.running('Public Search', `LinkedIn Discovery (Broad Fallback): ${broadQuery}`);
+
+      await page.goto(`https://www.google.com/search?q=${encodeURIComponent(broadQuery)}&num=5&hl=en`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 10000,
+      });
+      await new Promise(r => setTimeout(r, 1000));
+
+      const broadResults = await page.evaluate(() => {
+        const items = [];
+        document.querySelectorAll('div.g, a[href*="linkedin.com/in/"]').forEach(el => {
+          const anchor = el.tagName === 'A' ? el : el.querySelector('a[href*="linkedin.com/in/"]');
+          const titleEl = el.querySelector ? el.querySelector('h3') : null;
+          const snippetEl = el.querySelector ? el.querySelector('div[data-sncf], div.VwiC3b, span.aCOpRe') : null;
+          const href = anchor ? anchor.href : '';
+          if (href.includes('linkedin.com/in/')) {
+            items.push({
+              url: href,
+              title: titleEl ? titleEl.textContent.trim() : '',
+              snippet: snippetEl ? snippetEl.textContent.trim() : '',
+              isTargetedSearch: false,
+            });
+          }
+        });
+        return items;
+      });
+
+      if (broadResults.length > 0) {
+        candidateList.push(...broadResults);
+      }
+    } catch (err) {}
+  }
+
+  // Verify and select the best matching LinkedIn URL
+  const seenUrls = new Set();
+  for (const cand of candidateList) {
+    const normalized = normalizeLinkedInUrl(cand.url);
+    if (!normalized || seenUrls.has(normalized)) continue;
+    seenUrls.add(normalized);
+
+    logger.running('Public Search', `Verifying candidate LinkedIn profile match: ${normalized}`);
+    const isMatch = await verifyLinkedInProfileMatch({ ...cand, url: normalized }, identity, logger);
+
+    if (isMatch) {
+      logger.success('Public Search', `Verified LinkedIn profile matches target person: ${normalized}`);
+      if (!results.socialLinks.some(s => s.url === normalized)) {
+        results.socialLinks.push({ platform: 'LinkedIn', url: normalized, source: 'Search Engine (Verified)' });
+      }
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
+function normalizeLinkedInUrl(url) {
+  if (!url) return null;
+  const match = url.match(/https?:\/\/(?:[a-z]{2,3}\.)?linkedin\.com\/in\/([a-zA-Z0-9_-]+)/i);
+  if (match && match[1]) {
+    return `https://www.linkedin.com/in/${match[1]}`;
+  }
+  return null;
 }
 
 // ─── Company Official Domain Discovery ─────────────────────
