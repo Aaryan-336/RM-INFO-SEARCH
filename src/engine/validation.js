@@ -54,8 +54,10 @@ export async function validateContacts(allContacts, identity, logger) {
   for (const [_, phone] of phoneMap) {
     if (meetsThreshold(phone.confidence)) {
       // If it comes from web scraping, it must be proximate, AI-attributed, or cross-verified
+      // But enrichment API contacts (Apollo, Hunter, etc.) are already person-matched, so skip this check
       const isWebScraped = phone.sourceType === 'Company Website' || phone.sourceType === 'Web Search';
-      if (isWebScraped && !phone.crossVerified) {
+      const isEnrichment = phone.sourceType?.includes('Enrichment') || phone.sourceType?.includes('Apollo') || phone.sourceType?.includes('Hunter') || phone.sourceType?.includes('RocketReach') || phone.sourceType?.includes('PDL');
+      if (isWebScraped && !phone.crossVerified && !isEnrichment) {
         const attribution = phone.attribution || 0;
         if (attribution < ATTRIBUTION.PROXIMATE) {
           continue; // Skip unattributed web contacts
@@ -129,7 +131,9 @@ export async function validateContacts(allContacts, identity, logger) {
   for (const [_, email] of emailMap) {
     if (meetsThreshold(email.confidence)) {
       // Discard generic emails or mismatched name emails
-      if (email.nameCorrelation === 'mismatch' || email.nameCorrelation === 'generic') {
+      // But allow enrichment API results through since they're already person-matched
+      const isEnrichment = email.sourceType?.includes('Enrichment') || email.sourceType?.includes('Apollo') || email.sourceType?.includes('Hunter') || email.sourceType?.includes('RocketReach') || email.sourceType?.includes('PDL');
+      if ((email.nameCorrelation === 'mismatch' || email.nameCorrelation === 'generic') && !isEnrichment) {
         continue;
       }
       validated.emails.push(email);

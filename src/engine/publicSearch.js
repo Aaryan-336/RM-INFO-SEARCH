@@ -82,6 +82,7 @@ export async function publicSearch(identity, logger) {
     documentsFound: [],
     linkedinProfile: null,
     experience: [],
+    education: [],
   };
 
   let browser;
@@ -124,6 +125,9 @@ export async function publicSearch(identity, logger) {
         await scrapeUrl(page, url, identity, results, logger);
       }
     }
+
+    // 4.1 Google search for additional contacts (secondary engine)
+    await googleSearchForContacts(page, identity, results, allSnippets, logger);
 
     // 4.4 Email Candidate Generation & Search Verification
     const hasPersonalEmail = results.emails.some(e => isPersonalEmail(e.value, identity));
@@ -560,7 +564,8 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
   logger.running('Public Search', 'LinkedIn: Extracting structured data (JSON-LD + meta tags)...');
 
   // Inject session cookie if available
-  const cookieValue = process.env.LINKEDIN_COOKIE || (process.env.GEMINI_API_KEY?.startsWith('AQ.Ab') ? process.env.GEMINI_API_KEY : null);
+  const cookieValue = process.env.LINKEDIN_COOKIE;
+  let isAuthenticated = false;
   if (cookieValue) {
     try {
       logger.running('Public Search', 'LinkedIn: Injecting session cookie for authenticated scraping...');
@@ -572,6 +577,7 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
         secure: true,
         httpOnly: true
       });
+      isAuthenticated = true;
       logger.success('Public Search', 'LinkedIn: Session cookie injected successfully');
     } catch (cookieErr) {
       logger.warning('Public Search', `LinkedIn: Failed to inject session cookie: ${cookieErr.message}`);
@@ -579,12 +585,31 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
   }
 
   let html = '';
+  let authenticatedPageLoaded = false;
   // Prioritize Puppeteer if a session cookie is injected
-  if (cookieValue) {
+  if (isAuthenticated) {
     try {
       logger.running('Public Search', 'LinkedIn: Loading profile via Puppeteer with active session...');
-      await page.goto(linkedinUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+      await page.goto(linkedinUrl, { waitUntil: 'networkidle2', timeout: 20000 });
+
+      // Scroll down to trigger lazy loading of experience/education sections
+      logger.running('Public Search', 'LinkedIn: Scrolling page to load experience/education sections...');
+      await autoScrollLinkedIn(page);
+
+      // Wait a moment for dynamic content to render
+      await new Promise(r => setTimeout(r, 2000));
+
       html = await page.content();
+
+      // Check if we got an authenticated page (not a login wall)
+      const isLoginWall = html.includes('session_redirect') || html.includes('signup/cold-join') || html.includes('authwall');
+      if (!isLoginWall && html.length > 5000) {
+        authenticatedPageLoaded = true;
+        logger.success('Public Search', `LinkedIn: Authenticated page loaded (${(html.length / 1024).toFixed(0)}KB)`);
+      } else {
+        logger.warning('Public Search', 'LinkedIn: Session cookie may be expired — got login wall');
+        isAuthenticated = false;
+      }
     } catch (err) {
       logger.warning('Public Search', `LinkedIn: Puppeteer session navigation failed: ${err.message} — trying HTTP fetch...`);
     }
@@ -609,7 +634,7 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
         throw new Error(`HTTP ${res.status}`);
       }
     } catch (err) {
-      if (!cookieValue) {
+      if (!isAuthenticated) {
         logger.running('Public Search', `LinkedIn: HTTP fetch failed (${err.message}) — trying Puppeteer navigation...`);
         try {
           await page.goto(linkedinUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
@@ -623,7 +648,80 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
     }
   }
 
-  if (html && html.length > 200) {
+  // ── Strategy 0 (BEST): Authenticated DOM Scraping for Experience/Education ──
+  if (authenticatedPageLoaded) {
+    try {
+      logger.running('Public Search', 'LinkedIn: Parsing full DOM for experience and education...');
+      const domData = await extractLinkedInDOMData(page, logger);
+
+      if (domData.experience && domData.experience.length > 0) {
+        logger.success('Public Search', `LinkedIn DOM: Found ${domData.experience.length} experience entries`);
+        // Clear any less-reliable experience entries we had before
+        results.experience = [];
+        for (const exp of domData.experience) {
+          results.experience.push({
+            title: exp.title,
+            company: exp.company,
+            duration: exp.duration || 'Period N/A',
+            location: exp.location || '',
+            description: exp.description || '',
+            source: 'LinkedIn (Authenticated DOM)',
+            confidence: CONFIDENCE.COMPANY_WEBSITE,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      }
+
+      if (domData.education && domData.education.length > 0) {
+        logger.success('Public Search', `LinkedIn DOM: Found ${domData.education.length} education entries`);
+        results.education = domData.education.map(edu => ({
+          institution: edu.institution,
+          degree: edu.degree || '',
+          fieldOfStudy: edu.fieldOfStudy || '',
+          duration: edu.duration || '',
+          source: 'LinkedIn (Authenticated DOM)',
+          confidence: CONFIDENCE.COMPANY_WEBSITE,
+          timestamp: new Date().toISOString(),
+        }));
+      }
+
+      // Extract headline/name from profile top section
+      if (domData.headline) {
+        results.roles.push({
+          value: domData.headline,
+          source: linkedinUrl,
+          sourceType: 'LinkedIn (Authenticated DOM)',
+          confidence: CONFIDENCE.COMPANY_WEBSITE,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      if (domData.name) {
+        results.linkedinProfile = {
+          url: linkedinUrl,
+          name: domData.name,
+          headline: domData.headline || '',
+          location: domData.location || '',
+          source: 'LinkedIn (Authenticated DOM)',
+          confidence: CONFIDENCE.COMPANY_WEBSITE,
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      // Also collect full page text as a snippet for AI extraction fallback
+      if (domData.fullText) {
+        allSnippets.push({
+          title: `LinkedIn Profile: ${domData.name || identity.normalized.fullName}`,
+          href: linkedinUrl,
+          snippet: domData.fullText.substring(0, 3000),
+        });
+      }
+    } catch (domErr) {
+      logger.warning('Public Search', `LinkedIn: DOM extraction failed: ${domErr.message} — falling back to meta tags`);
+    }
+  }
+
+  if (html && html.length > 200 && !authenticatedPageLoaded) {
     try {
       // ── Strategy 1: JSON-LD ──
       const jsonLdMatch = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
@@ -1542,4 +1640,274 @@ function isPersonalEmail(email, identity) {
   if (initialMatch) return true;
 
   return false;
+}
+
+// ─── Google Search (Secondary Contact Discovery Engine) ──────
+
+async function googleSearchForContacts(page, identity, results, allSnippets, logger) {
+  const queries = [
+    `"${identity.normalized.fullName}" email phone mobile contact`,
+    `"${identity.normalized.fullName}" "@gmail.com" OR "@yahoo.com" OR "@hotmail.com" OR "@outlook.com"`,
+    `"${identity.normalized.fullName}" "+91" OR "phone" OR "mobile" OR "cell"`,
+  ];
+
+  for (const query of queries) {
+    try {
+      logger.running('Public Search', 'Google: Searching for additional contacts...');
+      const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=en`;
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+      await new Promise(r => setTimeout(r, 1500));
+
+      const searchData = await page.evaluate(() => {
+        const items = [];
+        // Google search result selectors
+        document.querySelectorAll('div.g, div[data-sokoban-container]').forEach(el => {
+          const titleEl = el.querySelector('h3');
+          const snippetEl = el.querySelector('div[data-sncf], div.VwiC3b, span.aCOpRe');
+          const linkEl = el.querySelector('a[href]');
+          if (titleEl) {
+            items.push({
+              title: titleEl.textContent.trim(),
+              snippet: snippetEl ? snippetEl.textContent.trim() : '',
+              href: linkEl ? linkEl.href : '',
+            });
+          }
+        });
+        // Also capture featured snippets and knowledge panels
+        const featuredSnippet = document.querySelector('div.IZ6rdc, div.hgKElc');
+        if (featuredSnippet) {
+          items.push({
+            title: 'Featured Snippet',
+            snippet: featuredSnippet.textContent.trim(),
+            href: '',
+          });
+        }
+        return items;
+      });
+
+      for (const item of searchData) {
+        allSnippets.push(item);
+        extractFromText(
+          (item.title || '') + ' ' + (item.snippet || ''),
+          item.href || 'Google Search',
+          identity,
+          results
+        );
+      }
+
+      if (searchData.length > 0) {
+        logger.success('Public Search', `Google: Extracted ${searchData.length} search results for contact signals`);
+      }
+    } catch (err) {
+      logger.warning('Public Search', `Google search failed: ${err.message}`);
+    }
+  }
+}
+
+// ─── LinkedIn Authenticated DOM Helpers ──────────────────────
+
+/**
+ * Scrolls the LinkedIn profile page down to trigger lazy-loading
+ * of experience, education, and other sections.
+ */
+async function autoScrollLinkedIn(page) {
+  try {
+    await page.evaluate(async () => {
+      const delay = (ms) => new Promise(r => setTimeout(r, ms));
+      const scrollStep = 400;
+      const maxScrolls = 20;
+      
+      for (let i = 0; i < maxScrolls; i++) {
+        window.scrollBy(0, scrollStep);
+        await delay(300);
+        
+        // Check if we've reached the bottom
+        if ((window.innerHeight + window.scrollY) >= document.body.scrollHeight - 200) {
+          break;
+        }
+      }
+
+      // Scroll back up slightly and then down to trigger any remaining lazy loads
+      window.scrollTo(0, 0);
+      await delay(500);
+      window.scrollTo(0, document.body.scrollHeight);
+      await delay(1000);
+    });
+  } catch (e) {
+    // Scroll errors are non-fatal
+  }
+}
+
+/**
+ * Extracts experience, education, name, headline, and location
+ * from an authenticated LinkedIn profile DOM.
+ * Uses multiple selector strategies to handle LinkedIn's evolving markup.
+ */
+async function extractLinkedInDOMData(page, logger) {
+  return await page.evaluate(() => {
+    const data = {
+      name: '',
+      headline: '',
+      location: '',
+      experience: [],
+      education: [],
+      fullText: '',
+    };
+
+    // ── Extract profile header ──
+    // Name: usually in h1 tag at the top
+    const nameEl = document.querySelector('h1.text-heading-xlarge, h1.inline, h1[class*="break-words"]');
+    if (nameEl) data.name = nameEl.textContent.trim();
+
+    // Headline
+    const headlineEl = document.querySelector('div.text-body-medium[data-generated-suggestion-target], div.text-body-medium.break-words');
+    if (headlineEl) data.headline = headlineEl.textContent.trim();
+
+    // Location
+    const locationEl = document.querySelector('span.text-body-small[class*="inline"][class*="t-black--light"]');
+    if (locationEl) data.location = locationEl.textContent.trim();
+
+    // ── Extract Experience Section ──
+    // LinkedIn uses #experience as an anchor, with the list following it
+    const experienceSection = document.getElementById('experience');
+    if (experienceSection) {
+      // The experience list is usually in a sibling or parent's next sibling
+      let listContainer = experienceSection.closest('section');
+      if (!listContainer) {
+        // Try finding the section by going up and looking for the list
+        listContainer = experienceSection.parentElement?.parentElement?.parentElement;
+      }
+
+      if (listContainer) {
+        // Each experience entry is typically a li item with nested divs
+        const entries = listContainer.querySelectorAll(':scope > div > ul > li, :scope > div > div > ul > li');
+
+        for (const entry of entries) {
+          const spans = entry.querySelectorAll('span[aria-hidden="true"]');
+          const textParts = Array.from(spans).map(s => s.textContent.trim()).filter(t => t.length > 0);
+
+          if (textParts.length === 0) continue;
+
+          // Check if this is a grouped company entry (multiple roles at same company)
+          const subEntries = entry.querySelectorAll(':scope > div > div > ul > li, :scope > div > div > div > ul > li');
+          
+          if (subEntries.length > 0) {
+            // Grouped company: first item is company name with total tenure
+            const companyName = textParts[0] || '';
+            const totalTenure = textParts.find(t => /\d+\s*(yr|mo|year|month)/i.test(t)) || '';
+
+            for (const sub of subEntries) {
+              const subSpans = sub.querySelectorAll('span[aria-hidden="true"]');
+              const subParts = Array.from(subSpans).map(s => s.textContent.trim()).filter(t => t.length > 0);
+              
+              if (subParts.length === 0) continue;
+
+              const title = subParts[0] || '';
+              const dateRange = subParts.find(t => /(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|present|\d{4})/i.test(t)) || '';
+              const durationMatch = subParts.find(t => /\d+\s*(yr|mo|year|month)/i.test(t) && t !== totalTenure);
+              const location = subParts.find(t => /,|city|state|area|india|mumbai|delhi|bangalore|pune|remote/i.test(t) && !t.includes('@') && !/\d{4}/.test(t)) || '';
+
+              const duration = dateRange ? (durationMatch ? `${dateRange} · ${durationMatch}` : dateRange) : (durationMatch || '');
+
+              if (title && companyName) {
+                data.experience.push({
+                  title,
+                  company: companyName,
+                  duration,
+                  location,
+                  description: '',
+                });
+              }
+            }
+          } else {
+            // Single role entry
+            const title = textParts[0] || '';
+            const company = textParts[1] || '';
+            const dateRange = textParts.find(t => /(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|present|\d{4})/i.test(t)) || '';
+            const durationMatch = textParts.find(t => /\d+\s*(yr|mo|year|month)/i.test(t));
+            const location = textParts.find(t => /,|city|area|india|mumbai|delhi|bangalore|pune|remote/i.test(t) && !t.includes('@') && !/\d{4}/.test(t)) || '';
+
+            const duration = dateRange ? (durationMatch && dateRange !== durationMatch ? `${dateRange} · ${durationMatch}` : dateRange) : (durationMatch || '');
+
+            if (title && company) {
+              data.experience.push({
+                title: title.replace(/\s*·\s*$/, ''),
+                company: company.replace(/\s*·\s*$/, ''),
+                duration,
+                location,
+                description: '',
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // ── Fallback: Try extracting experience from page text patterns ──
+    if (data.experience.length === 0) {
+      // Look for aria-label patterns that LinkedIn uses for accessibility
+      const expItems = document.querySelectorAll('[class*="experience"] li, [id*="experience"] ~ * li');
+      for (const item of expItems) {
+        const text = item.textContent.trim();
+        // Pattern: "Title Company Duration Location"
+        const parts = text.split('\n').map(s => s.trim()).filter(s => s.length > 0 && s.length < 200);
+        if (parts.length >= 2) {
+          const title = parts[0];
+          const company = parts.find((p, i) => i > 0 && !(/\d{4}/.test(p)) && !(/yr|mo|month|year/i.test(p))) || parts[1];
+          const dateRange = parts.find(p => /(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|present|\d{4})/i.test(p)) || '';
+          const durationMatch = parts.find(p => /\d+\s*(yr|mo|year|month)/i.test(p)) || '';
+
+          if (title && company && title !== company) {
+            data.experience.push({
+              title,
+              company,
+              duration: dateRange || durationMatch,
+              location: '',
+              description: '',
+            });
+          }
+        }
+      }
+    }
+
+    // ── Extract Education Section ──
+    const educationSection = document.getElementById('education');
+    if (educationSection) {
+      let listContainer = educationSection.closest('section');
+      if (!listContainer) {
+        listContainer = educationSection.parentElement?.parentElement?.parentElement;
+      }
+
+      if (listContainer) {
+        const entries = listContainer.querySelectorAll(':scope > div > ul > li, :scope > div > div > ul > li');
+
+        for (const entry of entries) {
+          const spans = entry.querySelectorAll('span[aria-hidden="true"]');
+          const textParts = Array.from(spans).map(s => s.textContent.trim()).filter(t => t.length > 0);
+
+          if (textParts.length === 0) continue;
+
+          const institution = textParts[0] || '';
+          const degree = textParts.find(t => /bachelor|master|b\.?tech|m\.?tech|b\.?e|m\.?e|b\.?sc|m\.?sc|b\.?a|m\.?a|mba|phd|diploma|high school|secondary|associate|doctor/i.test(t)) || textParts[1] || '';
+          const fieldOfStudy = textParts.find(t => /finance|engineering|computer|science|commerce|arts|economics|management|business|accounting|marketing|technology|mathematics/i.test(t) && t !== degree) || '';
+          const dateRange = textParts.find(t => /\d{4}\s*[-–]\s*\d{4}|\d{4}\s*[-–]\s*present/i.test(t)) || '';
+
+          if (institution) {
+            data.education.push({
+              institution,
+              degree: degree.replace(/\s*·\s*$/, ''),
+              fieldOfStudy: fieldOfStudy.replace(/\s*·\s*$/, ''),
+              duration: dateRange,
+            });
+          }
+        }
+      }
+    }
+
+    // ── Collect full page text for AI fallback ──
+    const mainContent = document.querySelector('main') || document.body;
+    data.fullText = mainContent.textContent.replace(/\s+/g, ' ').trim();
+
+    return data;
+  });
 }

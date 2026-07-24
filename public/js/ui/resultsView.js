@@ -33,6 +33,7 @@ export function renderResultsView(data) {
       ${renderCompanySection(company, query)}
       ${renderDirectorSection(directors, query)}
       ${renderTimelineSection(person?.experience)}
+      ${renderEducationSection(person?.education)}
       ${renderRealEstateSection(realEstate)}
       ${renderSocialSection(socialLinks)}
       ${renderBriefingSection(briefing)}
@@ -61,6 +62,37 @@ function renderTimelineSection(experience) {
       <div class="section-card-header">
         <span class="section-icon">⏳</span>
         <h3>Career Timeline</h3>
+      </div>
+      <div class="section-card-body">
+        <div class="timeline">
+          ${items}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ── Education Section ───────────────────────────────────
+
+function renderEducationSection(education) {
+  if (!education || education.length === 0) return '';
+
+  const items = education.map(edu => `
+    <div class="timeline-item">
+      <div class="timeline-date">${escHtml(edu.duration || '')}</div>
+      <div class="timeline-content">
+        <strong>${escHtml(edu.institution || 'Institution')}</strong>
+        ${edu.degree ? `<br><span>${escHtml(edu.degree)}</span>` : ''}
+        ${edu.fieldOfStudy ? `<br><small style="color: var(--primary-muted)">${escHtml(edu.fieldOfStudy)}</small>` : ''}
+      </div>
+    </div>
+  `).join('');
+
+  return `
+    <div class="section-card">
+      <div class="section-card-header">
+        <span class="section-icon">🎓</span>
+        <h3>Education</h3>
       </div>
       <div class="section-card-body">
         <div class="timeline">
