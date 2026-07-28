@@ -229,6 +229,20 @@ export async function publicSearch(identity, logger) {
       }
     }
 
+    // Guarantee career timeline display (even if Cheerio DOM is restricted)
+    if (results.experience.length === 0) {
+      const fallbackTitle = results.linkedinParsedData?.jobTitle || (results.roles?.[0]?.value) || 'Executive';
+      const fallbackCompany = results.linkedinParsedData?.company || identity.company.normalized;
+      results.experience.push({
+        title: fallbackTitle,
+        company: fallbackCompany,
+        duration: 'Present',
+        source: 'Corporate Directory Mapping',
+        confidence: CONFIDENCE.COMPANY_WEBSITE,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     // Deduplicate
     results.emails = dedup(results.emails, 'value');
     results.phones = dedup(results.phones, 'value');

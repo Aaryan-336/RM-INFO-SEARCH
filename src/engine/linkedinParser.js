@@ -302,6 +302,8 @@ export function parsePublicLinkedInHtml(htmlString) {
       result.name.toLowerCase().includes('sign up') || 
       result.name.toLowerCase().includes('log in') || 
       result.name.toLowerCase().includes('join linkedin') ||
+      result.name.toLowerCase().includes('linkedin.com') ||
+      result.name.toLowerCase().includes('http') ||
       result.name.toLowerCase() === 'linkedin'
   )) {
     result.name = null;
