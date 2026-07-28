@@ -8,16 +8,17 @@ import * as cheerio from 'cheerio';
 /**
  * Parses public LinkedIn profile HTML into a normalized JSON structure.
  * @param {string} htmlString - Raw HTML content of LinkedIn profile page
+ * @param {string} [fallbackUrl] - Discovered profile URL from search engine discovery
  * @returns {Object} Normalized JSON profile data
  */
-export function parsePublicLinkedInHtml(htmlString) {
+export function parsePublicLinkedInHtml(htmlString, fallbackUrl = null) {
   const result = {
     name: null,
     headline: null,
     location: null,
     jobTitle: null,
     company: null,
-    profileUrl: null,
+    profileUrl: fallbackUrl ? normalizeLinkedInUrl(fallbackUrl) : null,
     image: null,
     about: null,
     experience: [],

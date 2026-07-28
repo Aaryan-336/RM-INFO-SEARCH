@@ -661,7 +661,7 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
   if (html && html.length > 200) {
     try {
       logger.running('Public Search', 'LinkedIn: Running Cheerio public HTML parser...');
-      const parsedData = parsePublicLinkedInHtml(html);
+      const parsedData = parsePublicLinkedInHtml(html, linkedinUrl);
       results.linkedinParsedData = parsedData;
 
       if (parsedData.profileUrl) {
@@ -819,7 +819,7 @@ async function fetchLinkedInSerpMirror(linkedinUrl, identity, logger) {
               </html>
             `;
 
-            const parsed = parsePublicLinkedInHtml(virtualHtml);
+            const parsed = parsePublicLinkedInHtml(virtualHtml, linkedinUrl);
             if (parsed && (parsed.name || parsed.jobTitle || parsed.headline)) {
               return parsed;
             }
