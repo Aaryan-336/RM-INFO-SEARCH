@@ -534,9 +534,14 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
         logger.running('Public Search', `LinkedIn: HTTP fetch failed (${err.message}) — trying Puppeteer navigation...`);
         try {
           await page.goto(linkedinUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+          await new Promise(r => setTimeout(r, 1200));
           html = await page.content();
         } catch (pe) {
-          logger.warning('Public Search', `LinkedIn: Puppeteer fallback navigation also failed: ${pe.message}`);
+          try {
+            html = await page.content();
+          } catch (e2) {
+            logger.warning('Public Search', `LinkedIn: Puppeteer fallback navigation failed: ${pe.message}`);
+          }
         }
       } else {
         logger.warning('Public Search', `LinkedIn: HTTP fetch fallback failed: ${err.message}`);
