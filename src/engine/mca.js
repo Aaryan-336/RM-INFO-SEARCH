@@ -27,11 +27,11 @@ export async function fetchMCAIntelligence(identity, logger) {
   try {
     // ── Strategy 1: AI Search Snippet Extraction (Out-of-the-box, Cloudflare-proof) ──
     logger.running('MCA Intelligence', 'Performing search discovery to extract corporate records...');
-    // We will search for company directors, CIN, and registry details
+    const coreTerm = identity.company.coreWords && identity.company.coreWords.length > 0 ? identity.company.coreWords.join(' ') : companyName;
     const searchQueries = [
       `${companyName} directors zaubacorp`,
-      `${companyName} CIN tofler instafinancials`,
-      `${companyName} company master data filesure`
+      `${coreTerm} CIN tofler instafinancials zaubacorp`,
+      `${companyName} company master data`
     ];
 
     let allSnippets = [];
@@ -81,7 +81,7 @@ export async function fetchMCAIntelligence(identity, logger) {
 
     // ── Strategy 2: Traditional Scraper Fallback (in case AI/Search fails) ──
     logger.running('MCA Intelligence', 'Snippet extraction returned no clear matches. Falling back to direct URL discovery...');
-    const discoveredCompanyUrls = await discoverCompanyUrls(companyName, logger);
+    const discoveredCompanyUrls = await discoverCompanyUrls(companyName, identity, logger);
     
     for (const url of discoveredCompanyUrls) {
       if (result.company) break;
@@ -102,6 +102,15 @@ export async function fetchMCAIntelligence(identity, logger) {
           result.directors = toflerResult.directors;
           result.source = 'Tofler (Fuzzy Match)';
           result.confidence = CONFIDENCE.DIRECTOR_DATA;
+          break;
+        }
+      } else if (url.includes('instafinancials.com')) {
+        const instaResult = await scrapeInstaFinancialsPage(url, identity, logger);
+        if (instaResult) {
+          result.company = instaResult.company;
+          result.directors = instaResult.directors;
+          result.source = 'InstaFinancials (Fuzzy Match)';
+          result.confidence = CONFIDENCE.MCA_DATA;
           break;
         }
       }
@@ -154,7 +163,9 @@ async function searchDDG(query, logger) {
 
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(6000) });
-    if (!res.ok) throw new Error(`DDG response status ${res.status}`);
+    if (!res.ok || res.status !== 200) {
+      throw new Error(`HTTP ${res.status}`);
+    }
     
     const html = await res.text();
     const $ = cheerio.load(html);
@@ -165,7 +176,6 @@ async function searchDDG(query, logger) {
       const snippet = $(el).find('.result__snippet');
       let href = anchor.attr('href') || '';
       
-      // Decode DDG redirect url
       if (href.includes('uddg=')) {
         try {
           const match = href.match(/uddg=([^&]+)/);
@@ -174,51 +184,73 @@ async function searchDDG(query, logger) {
       }
       if (href.startsWith('//')) href = 'https:' + href;
 
-      results.push({
-        title: anchor.text().trim(),
-        snippet: snippet.text().trim(),
-        url: href
-      });
+      if (anchor.text().trim()) {
+        results.push({
+          title: anchor.text().trim(),
+          snippet: snippet.text().trim(),
+          url: href
+        });
+      }
     });
+
+    if (results.length === 0) {
+      throw new Error('0 results returned (silent rate limit)');
+    }
     
     return results;
   } catch (e) {
-    logger.warning('MCA Intelligence', `DDG fetch failed for "${query}": ${e.message}. Trying Puppeteer fallback...`);
-    return await searchDDGPuppeteer(query, logger);
+    logger.warning('MCA Intelligence', `DDG search failed for "${query}" (${e.message}) — trying Google Stealth fallback...`);
+    return await searchGoogleStealth(query, logger);
   }
 }
 
-async function searchDDGPuppeteer(query, logger) {
+async function searchGoogleStealth(query, logger) {
   let page = null;
   try {
     const browser = await getBrowser();
     page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    
-    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
-    
-    const results = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('.result__body')).map(el => {
-        const anchor = el.querySelector('a.result__a');
-        const snippet = el.querySelector('.result__snippet');
-        let href = anchor?.getAttribute('href') || '';
-        if (href.includes('uddg=')) {
-          try {
-            const match = href.match(/uddg=([^&]+)/);
-            if (match) href = decodeURIComponent(match[1]);
-          } catch (e) {}
-        }
-        return {
-          title: anchor?.textContent?.trim() || '',
-          snippet: snippet?.textContent?.trim() || '',
-          url: href
-        };
-      });
+    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
+
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en`;
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+    await new Promise(r => setTimeout(r, 1200));
+
+    const results = await page.evaluate(() => {
+      const items = [];
+      document.querySelectorAll('h3').forEach(h3 => {
+        const anchor = h3.closest('a');
+        if (!anchor) return;
+        let href = anchor.getAttribute('href') || anchor.href || '';
+        if (href.includes('/url?q=')) {
+          const match = href.match(/\/url\?q=([^&]+)/);
+          if (match) href = decodeURIComponent(match[1]);
+        }
+        const container = h3.closest('div.g, div.MjjYud, div[data-sokoban-container]') || h3.parentElement?.parentElement;
+        const snippetEl = container ? container.querySelector('div[data-sncf], div.VwiC3b, span.aCOpRe') : null;
+        
+        if (href.startsWith('http') && !href.includes('google.com')) {
+          items.push({
+            title: h3.textContent.trim(),
+            url: href,
+            snippet: snippetEl ? snippetEl.textContent.trim() : (container ? container.textContent.trim().substring(0, 300) : '')
+          });
+        }
+      });
+      return items;
+    });
+
+    if (results.length > 0) {
+      logger.success('MCA Intelligence', `Google Stealth search found ${results.length} corporate signals for query "${query}"`);
+    }
+
     return results;
   } catch (err) {
-    logger.error('MCA Intelligence', `Puppeteer search fallback failed: ${err.message}`);
+    logger.error('MCA Intelligence', `Google Stealth search fallback failed: ${err.message}`);
     return [];
   } finally {
     if (page) await page.close().catch(() => {});
@@ -226,7 +258,7 @@ async function searchDDGPuppeteer(query, logger) {
 }
 
 // ─── AI Extraction ────────────────────────────────────────
-async function extractCorporateDataWithAI(companyName, snippets, logger) {
+export async function extractCorporateDataWithAI(companyName, snippets, logger) {
   const snippetsText = snippets.map((r, i) => `[Signal #${i+1}]\nTitle: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}`).join('\n\n');
   
   const prompt = `You are a precise corporate registry data extraction engine.
@@ -307,20 +339,29 @@ Rules:
 }
 
 // ─── Traditional URL Discovery Fallback ───────────────────
-async function discoverCompanyUrls(companyName, logger) {
+async function discoverCompanyUrls(companyName, identity, logger) {
   const urls = [];
-  try {
-    const q = `${companyName} zaubacorp OR tofler`;
-    const results = await searchDDG(q, logger);
-    for (const r of results) {
-      const url = r.url;
-      if ((url.includes('zaubacorp.com/') && url.length > 30 && !url.includes('/company-list/')) || 
-          (url.includes('tofler.in/') && url.length > 30 && !url.includes('/companylist'))) {
-        urls.push(url);
+  const terms = [companyName, ...(identity?.company?.variants || [])].slice(0, 4);
+
+  for (const term of terms) {
+    if (urls.length >= 3) break;
+    try {
+      const q = `${term} zaubacorp OR tofler OR instafinancials`;
+      const results = await searchDDG(q, logger);
+      for (const r of results) {
+        const url = r.url;
+        if (url && (
+            (url.includes('zaubacorp.com') && !url.includes('/company-list/')) || 
+            (url.includes('tofler.in') && !url.includes('/companylist')) ||
+            (url.includes('instafinancials.com') && !url.includes('/company-list')) ||
+            (url.includes('thecompanycheck.com') && !url.includes('/search'))
+        )) {
+          urls.push(url);
+        }
       }
+    } catch (e) {
+      logger.warning('MCA Intelligence', `URL discovery failed for "${term}": ${e.message}`);
     }
-  } catch (e) {
-    logger.warning('MCA Intelligence', `URL discovery failed: ${e.message}`);
   }
   return [...new Set(urls)];
 }
@@ -534,5 +575,64 @@ async function tryOpenCorporates(companyName, identity, logger) {
     return { company, directors };
   } catch {
     return null;
+  }
+}
+
+// ─── InstaFinancials scraping fallback via Puppeteer ──────
+async function scrapeInstaFinancialsPage(companyUrl, identity, logger) {
+  let page = null;
+  try {
+    const browser = await getBrowser();
+    page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    
+    logger.running('MCA Intelligence', `Scraping InstaFinancials fallback page: ${companyUrl}`);
+    await page.goto(companyUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+    
+    const html = await page.content();
+    const $c = cheerio.load(html);
+    let extractedName = $c('h1.company-name, h1.title, .company-header h1, h1').first().text().trim();
+    const coreWords = identity.company.coreWords || [];
+    const isValidName = extractedName && extractedName.length < 80 && coreWords.some(w => extractedName.toLowerCase().includes(w.toLowerCase()));
+    
+    const company = {
+      companyName: isValidName ? extractedName : identity.company.normalized,
+      source: 'InstaFinancials (Scraped)',
+      confidence: CONFIDENCE.MCA_DATA,
+      timestamp: new Date().toISOString(),
+    };
+
+    $c('tr, .data-row').each((_, el) => {
+      const label = $c(el).find('th, td:first-child, .label').text().trim().toLowerCase();
+      const value = $c(el).find('td:last-child, .value').text().trim();
+
+      if (label.includes('cin') && value) company.cin = value;
+      else if (label.includes('incorporation') && value) company.incorporationDate = value;
+      else if (label.includes('status') && value) company.status = value;
+      else if (label.includes('address') && value) company.registeredAddress = value;
+      else if (label.includes('authorized') && value) company.authorizedCapital = value;
+      else if (label.includes('paid up') && value) company.paidUpCapital = value;
+      else if (label.includes('industry') && value) company.industry = value;
+    });
+
+    const directors = [];
+    $c('a[href*="director"], td a[href*="din"], .director-item').each((_, el) => {
+      const name = $c(el).text().trim();
+      if (name && name.length > 2 && name.length < 60 && !name.toLowerCase().includes('director')) {
+        directors.push({
+          name,
+          source: 'InstaFinancials (Scraped)',
+          confidence: CONFIDENCE.DIRECTOR_DATA,
+          timestamp: new Date().toISOString()
+        });
+      }
+    });
+
+    return { company, directors };
+  } catch (e) {
+    logger.warning('MCA Intelligence', `InstaFinancials fallback scraping failed: ${e.message}`);
+    return null;
+  } finally {
+    if (page) await page.close().catch(() => {});
   }
 }

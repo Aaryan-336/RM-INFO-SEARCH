@@ -8,6 +8,7 @@ import puppeteer from 'puppeteer';
 import * as cheerio from 'cheerio';
 import { CONFIDENCE, ATTRIBUTION, computeFinalConfidence } from '../utils/confidence.js';
 import { callGroqWithFallback } from '../utils/groq.js';
+import { parsePublicLinkedInHtml } from './linkedinParser.js';
 
 const CONTACT_PAGE_PATHS = [
   '/about', '/about-us', '/team', '/our-team', '/leadership',
@@ -61,6 +62,7 @@ export async function getBrowser() {
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
+      '--disable-blink-features=AutomationControlled',
       '--window-size=1280,900',
     ],
   });
@@ -81,6 +83,7 @@ export async function publicSearch(identity, logger) {
     pagesSearched: [],
     documentsFound: [],
     linkedinProfile: null,
+    linkedinParsedData: null,
     experience: [],
     education: [],
   };
@@ -275,40 +278,66 @@ async function duckDuckGoSearch(page, identity, results, allSnippets, logger) {
     `"${identity.normalized.fullName}" ${companyQueryPart} filetype:pdf`,
   ];
 
+  let ddgBlocked = false;
+
   for (const query of queries) {
     try {
-      logger.running('Public Search', `DuckDuckGo: Searching...`);
+      logger.running('Public Search', `Public Search: Querying...`);
+      let pageUrls = [];
 
-      const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
-      await page.waitForSelector('a.result__a', { timeout: 5000 }).catch(() => {});
+      if (!ddgBlocked) {
+        try {
+          const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+          const res = await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 4000 });
+          if (!res || res.status() !== 200) {
+            ddgBlocked = true;
+          } else {
+            await page.waitForSelector('a.result__a', { timeout: 2000 }).catch(() => { ddgBlocked = true; });
+            pageUrls = await page.evaluate(() => {
+              const links = document.querySelectorAll('a.result__a');
+              return Array.from(links).map(a => {
+                let href = a.getAttribute('href') || '';
+                if (href.startsWith('//')) href = 'https:' + href;
+                if (href.includes('uddg=')) {
+                  try {
+                    const urlObj = new URL(href);
+                    const uddg = urlObj.searchParams.get('uddg');
+                    if (uddg) href = uddg;
+                  } catch (e) {}
+                }
+                return { href, text: a.textContent.trim() };
+              }).filter(l => l.href && l.href.startsWith('http'));
+            });
+          }
+        } catch (e) {
+          ddgBlocked = true;
+        }
+      }
 
-      const pageUrls = await page.evaluate(() => {
-        const links = document.querySelectorAll('a.result__a');
-        return Array.from(links).map(a => {
-          let href = a.getAttribute('href') || '';
-          // Resolve relative protocol
-          if (href.startsWith('//')) {
-            href = 'https:' + href;
-          } else if (href.startsWith('/')) {
-            href = 'https://duckduckgo.com' + href;
-          }
-          
-          // Decode uddg redirect URL
-          if (href.includes('uddg=')) {
-            try {
-              const urlObj = new URL(href);
-              const uddg = urlObj.searchParams.get('uddg');
-              if (uddg) href = uddg;
-            } catch (e) {}
-          }
-          
-          return {
-            href,
-            text: a.textContent.trim(),
-          };
-        }).filter(l => l.href && l.href.startsWith('http'));
-      });
+      // Google search fallback if DDG throttled or blocked
+      if (pageUrls.length === 0) {
+        try {
+          const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en`;
+          await page.goto(googleUrl, { waitUntil: 'domcontentloaded', timeout: 6000 });
+          await new Promise(r => setTimeout(r, 600));
+          pageUrls = await page.evaluate(() => {
+            const items = [];
+            document.querySelectorAll('h3').forEach(h3 => {
+              const anchor = h3.closest('a');
+              if (!anchor) return;
+              let href = anchor.getAttribute('href') || anchor.href || '';
+              if (href.includes('/url?q=')) {
+                const match = href.match(/\/url\?q=([^&]+)/);
+                if (match) href = decodeURIComponent(match[1]);
+              }
+              if (href.startsWith('http') && !href.includes('google.com')) {
+                items.push({ href, text: h3.textContent.trim() });
+              }
+            });
+            return items;
+          });
+        } catch (ge) {}
+      }
 
       for (const { href, text } of pageUrls.slice(0, 8)) {
         if (!href.includes('duckduckgo.com')) {
@@ -588,116 +617,76 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
     }
   }
 
-  if (html && html.length > 200 && !authenticatedPageLoaded) {
+  if (html && html.length > 200) {
     try {
-      // ── Strategy 1: JSON-LD ──
-      const jsonLdMatch = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
-      if (jsonLdMatch) {
-        try {
-          const ld = JSON.parse(jsonLdMatch[1]);
-          logger.success('Public Search', 'LinkedIn: Found JSON-LD structured data');
+      logger.running('Public Search', 'LinkedIn: Running Cheerio public HTML parser...');
+      const parsedData = parsePublicLinkedInHtml(html);
+      results.linkedinParsedData = parsedData;
 
-          const name = ld.name || ld['@graph']?.[0]?.name;
-          const jobTitle = ld.jobTitle || ld['@graph']?.[0]?.jobTitle;
-          const description = ld.description || ld['@graph']?.[0]?.description;
-          const worksFor = ld.worksFor?.name || ld['@graph']?.[0]?.worksFor?.name;
-          const address = ld.address?.addressLocality || ld['@graph']?.[0]?.address?.addressLocality;
+      if (parsedData.profileUrl) {
+        linkedinUrl = parsedData.profileUrl;
+      }
 
-          results.linkedinProfile = {
-            url: linkedinUrl,
-            name,
-            headline: jobTitle || description?.substring(0, 120),
-            location: address,
-            source: 'LinkedIn (JSON-LD)',
+      if (parsedData.headline || parsedData.jobTitle) {
+        const headlineText = parsedData.headline || (parsedData.jobTitle ? `${parsedData.jobTitle} @ ${parsedData.company || ''}` : '');
+        results.roles.push({
+          value: headlineText,
+          source: linkedinUrl,
+          sourceType: 'LinkedIn (Cheerio Public Parser)',
+          confidence: CONFIDENCE.COMPANY_WEBSITE,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      if (parsedData.jobTitle && parsedData.company) {
+        if (!results.experience.some(exp => exp.company?.toLowerCase() === parsedData.company.toLowerCase())) {
+          results.experience.push({
+            title: parsedData.jobTitle,
+            company: parsedData.company,
+            duration: 'Current',
+            source: 'LinkedIn (Cheerio Public Parser)',
             confidence: CONFIDENCE.COMPANY_WEBSITE,
             timestamp: new Date().toISOString(),
-          };
+          });
+        }
+      }
 
-          if (jobTitle) {
-            results.roles.push({
-              value: jobTitle,
-              source: linkedinUrl,
-              sourceType: 'LinkedIn (JSON-LD)',
-              confidence: CONFIDENCE.COMPANY_WEBSITE,
-              timestamp: new Date().toISOString(),
-            });
-          }
-
-          if (jobTitle && worksFor) {
-            if (!results.experience.some(exp => exp.company?.toLowerCase() === worksFor.toLowerCase())) {
+      if (parsedData.experience && parsedData.experience.length > 0) {
+        for (const exp of parsedData.experience) {
+          if (exp.company && exp.title) {
+            if (!results.experience.some(e => e.company?.toLowerCase() === exp.company.toLowerCase() && e.title?.toLowerCase() === exp.title.toLowerCase())) {
               results.experience.push({
-                title: jobTitle,
-                company: worksFor,
-                duration: 'Current',
-                source: 'LinkedIn (JSON-LD)',
+                title: exp.title,
+                company: exp.company,
+                duration: exp.duration || 'Period N/A',
+                location: exp.location || '',
+                description: exp.description || '',
+                source: 'LinkedIn (Cheerio Public Parser)',
                 confidence: CONFIDENCE.COMPANY_WEBSITE,
                 timestamp: new Date().toISOString(),
               });
             }
           }
-
-          // Parse the sameAs links for other social profiles
-          const sameAs = ld.sameAs || ld['@graph']?.[0]?.sameAs || [];
-          if (Array.isArray(sameAs)) {
-            for (const link of sameAs) {
-              if (link.includes('twitter.com') || link.includes('x.com')) {
-                results.socialLinks.push({ platform: 'Twitter/X', url: link, source: 'LinkedIn (JSON-LD)' });
-              }
-            }
-          }
-        } catch (e) {
-          // JSON-LD parse failed
         }
       }
 
-      // ── Strategy 2: Open Graph meta tags ──
-      if (!results.linkedinProfile) {
-        const ogTitle = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i)?.[1];
-        const ogDesc = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i)?.[1];
-        const twitterTitle = html.match(/<meta[^>]*name=["']twitter:title["'][^>]*content=["']([^"']+)["']/i)?.[1];
-        const titleTag = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
-
-        const bestTitle = ogTitle || twitterTitle || titleTag || '';
-        const parsed = parseLinkedInTitle(bestTitle, identity);
-
-        if (parsed || ogDesc) {
-          results.linkedinProfile = {
-            url: linkedinUrl,
-            name: identity.normalized.fullName,
-            headline: parsed?.role || ogDesc?.substring(0, 120) || bestTitle,
-            source: 'LinkedIn (Meta Tags)',
-            confidence: CONFIDENCE.PUBLIC_DIRECTORY,
-            timestamp: new Date().toISOString(),
-          };
-
-          if (parsed?.role) {
-            results.roles.push({
-              value: parsed.role,
-              source: linkedinUrl,
-              sourceType: 'LinkedIn (Meta Tags)',
-              confidence: CONFIDENCE.PUBLIC_DIRECTORY,
+      if (parsedData.education && parsedData.education.length > 0) {
+        for (const edu of parsedData.education) {
+          if (edu.institution) {
+            results.education.push({
+              institution: edu.institution,
+              degree: edu.degree || '',
+              fieldOfStudy: edu.fieldOfStudy || '',
+              duration: edu.duration || '',
+              source: 'LinkedIn (Cheerio Public Parser)',
+              confidence: CONFIDENCE.COMPANY_WEBSITE,
               timestamp: new Date().toISOString(),
             });
           }
-
-          if (parsed?.role && parsed?.company) {
-            if (!results.experience.some(exp => exp.company?.toLowerCase() === parsed.company.toLowerCase())) {
-              results.experience.push({
-                title: parsed.role,
-                company: parsed.company,
-                duration: 'Current / Recent',
-                source: 'LinkedIn (Meta Tags)',
-                confidence: CONFIDENCE.PUBLIC_DIRECTORY,
-                timestamp: new Date().toISOString(),
-              });
-            }
-          }
-
-          logger.success('Public Search', `LinkedIn: Extracted from meta tags — "${parsed?.role || ogDesc?.substring(0, 60) || 'profile found'}"`);
         }
       }
 
-      // Extract any emails/phones from the raw HTML
+      logger.success('Public Search', `LinkedIn: Cheerio parser extracted profile for "${parsedData.name || identity.normalized.fullName}" (confidence: ${parsedData.confidence})`);
       extractFromText(html.substring(0, 10000), linkedinUrl, identity, results);
     } catch (e) {
       logger.warning('Public Search', `LinkedIn: Extraction error: ${e.message}`);
@@ -1327,12 +1316,18 @@ async function verifyLinkedInProfileMatch(candidate, identity, logger) {
   const lastName = identity.normalized.lastName.toLowerCase();
   const companyWords = identity.company.coreWords || [];
 
-  // Check if URL or title matches target person's name
-  const nameMatch = (firstName && urlLower.includes(firstName)) || (lastName && urlLower.includes(lastName)) ||
-                    (firstName && titleLower.includes(firstName)) || (lastName && titleLower.includes(lastName));
+  // Require BOTH first name and last name to match in the candidate URL or title
+  const hasFirstName = firstName ? (urlLower.includes(firstName) || titleLower.includes(firstName)) : true;
+  const hasLastName = lastName ? (urlLower.includes(lastName) || titleLower.includes(lastName)) : true;
+  const exactNameMatch = hasFirstName && hasLastName;
 
-  // Targeted search results with matching name are accepted
-  if (candidate.isTargetedSearch && nameMatch) {
+  // If the candidate profile does NOT match both first and last name, reject immediately to prevent false positives
+  if (!exactNameMatch) {
+    return false;
+  }
+
+  // Targeted search results with matching full name are accepted
+  if (candidate.isTargetedSearch) {
     return true;
   }
 
@@ -1434,18 +1429,15 @@ async function discoverLinkedInProfileUrl(page, identity, results, allSnippets, 
   }
 
   const fullName = identity.normalized.fullName;
-  const companyTerm = identity.company.officialName
-    ? identity.company.officialName.replace(/\b(private|limited|llp|pvt|ltd|inc|corp|corporation|co|company|india)\b/gi, '').trim()
-    : identity.company.normalized;
-
+  const companyTerm = identity.company.officialName || identity.company.normalized;
   const candidateList = [];
 
-  // Search Engine 1: Google Search (most reliable for LinkedIn profile URLs)
+  // Search Engine 1: Google Natural Search (e.g. "Jainam Shah ASK Wealth Advisors")
   try {
-    const googleQuery = `site:linkedin.com/in "${fullName}" "${companyTerm}"`;
+    const googleQuery = `${fullName} ${companyTerm}`;
     logger.running('Public Search', `LinkedIn Discovery (Google): ${googleQuery}`);
     
-    await page.goto(`https://www.google.com/search?q=${encodeURIComponent(googleQuery)}&num=5&hl=en`, {
+    await page.goto(`https://www.google.com/search?q=${encodeURIComponent(googleQuery)}&num=10&hl=en`, {
       waitUntil: 'domcontentloaded',
       timeout: 10000,
     });
@@ -1453,16 +1445,19 @@ async function discoverLinkedInProfileUrl(page, identity, results, allSnippets, 
 
     const googleResults = await page.evaluate(() => {
       const items = [];
-      document.querySelectorAll('div.g, div[data-sokoban-container], a[href*="linkedin.com/in/"]').forEach(el => {
-        const anchor = el.tagName === 'A' ? el : el.querySelector('a[href*="linkedin.com/in/"]');
-        const titleEl = el.querySelector ? el.querySelector('h3') : null;
-        const snippetEl = el.querySelector ? el.querySelector('div[data-sncf], div.VwiC3b, span.aCOpRe') : null;
-        
-        let href = anchor ? anchor.href : '';
+      document.querySelectorAll('a').forEach(a => {
+        let href = a.href || a.getAttribute('href') || '';
+        if (href.includes('/url?q=')) {
+          const match = href.match(/\/url\?q=([^&]+)/);
+          if (match) href = decodeURIComponent(match[1]);
+        }
         if (href.includes('linkedin.com/in/')) {
+          const h3 = a.querySelector('h3') || a.parentElement?.querySelector('h3');
+          const container = a.closest('div.g, div.MjjYud, div[data-sokoban-container]') || a.parentElement?.parentElement;
+          const snippetEl = container ? container.querySelector('div[data-sncf], div.VwiC3b, span.aCOpRe') : null;
           items.push({
             url: href,
-            title: titleEl ? titleEl.textContent.trim() : (anchor ? anchor.textContent.trim() : ''),
+            title: h3 ? h3.textContent.trim() : a.textContent.trim(),
             snippet: snippetEl ? snippetEl.textContent.trim() : '',
             isTargetedSearch: true,
           });
@@ -1479,10 +1474,10 @@ async function discoverLinkedInProfileUrl(page, identity, results, allSnippets, 
     logger.warning('Public Search', `Google LinkedIn discovery failed: ${err.message}`);
   }
 
-  // Search Engine 2: DuckDuckGo HTML Search
+  // Search Engine 2: DuckDuckGo Search (Natural unquoted query)
   if (candidateList.length === 0) {
     try {
-      const ddgQuery = `site:linkedin.com/in "${fullName}" "${companyTerm}"`;
+      const ddgQuery = `${fullName} ${companyTerm}`;
       logger.running('Public Search', `LinkedIn Discovery (DuckDuckGo): ${ddgQuery}`);
 
       await page.goto(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(ddgQuery)}`, {
@@ -1882,19 +1877,11 @@ async function extractLinkedInDOMData(page, logger) {
     if (locationEl) data.location = locationEl.textContent.trim();
 
     // ── Extract Experience Section ──
-    // LinkedIn uses #experience as an anchor, with the list following it
-    const experienceSection = document.getElementById('experience');
-    if (experienceSection) {
-      // The experience list is usually in a sibling or parent's next sibling
-      let listContainer = experienceSection.closest('section');
-      if (!listContainer) {
-        // Try finding the section by going up and looking for the list
-        listContainer = experienceSection.parentElement?.parentElement?.parentElement;
-      }
-
+    const experienceAnchor = document.getElementById('experience') || document.querySelector('section[data-section="experience"], section.pv-profile-section.experience-section, [id*="experience"]');
+    if (experienceAnchor) {
+      let listContainer = experienceAnchor.closest('section') || experienceAnchor.parentElement?.parentElement?.parentElement;
       if (listContainer) {
-        // Each experience entry is typically a li item with nested divs
-        const entries = listContainer.querySelectorAll(':scope > div > ul > li, :scope > div > div > ul > li');
+        const entries = listContainer.querySelectorAll('ul > li');
 
         for (const entry of entries) {
           const spans = entry.querySelectorAll('span[aria-hidden="true"]');

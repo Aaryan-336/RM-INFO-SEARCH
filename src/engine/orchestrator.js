@@ -133,6 +133,7 @@ export async function runPipeline(personName, companyName, linkedinUrl, onLog) {
     result.person.bios = searchResults.bios || [];
     result.person.experience = searchResults.experience || [];
     result.person.education = searchResults.education || [];
+    result.person.linkedinParsedData = searchResults.linkedinParsedData || null;
 
     // Add enrichment profile data
     for (const profile of allProfiles) {
