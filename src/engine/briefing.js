@@ -37,35 +37,35 @@ export async function generateBriefing(identity, validatedContacts, mcaData, all
   return briefing;
 }
 
-const BRIEFING_PROMPT = `You are an expert Relationship Manager intelligence analyst for a private bank or wealth management firm.
+const BRIEFING_PROMPT = `You are a Senior Private Wealth & HNI/UHNI Relationship Manager intelligence analyst for a top-tier private bank and wealth management institution.
 
-Given the following collected intelligence about a business contact, generate a concise RM briefing.
+Given the following aggregated intelligence about a High-Net-Worth / Executive business contact, generate a comprehensive Private Banking RM Briefing.
 
 INTELLIGENCE COLLECTED:
 {CONTEXT}
 
 Generate a JSON response with exactly this structure:
 {
-  "experienceSummary": "One-line summary of the person's experience and current role",
+  "experienceSummary": "One-line executive summary of the person's professional background, primary directorships, and current role",
+  "wealthTierAndCorporateFootprint": "Summary of corporate scale, directorships (DIN), paid-up capital of primary companies, and estimated net-worth tier indicator",
   "talkingPoints": [
-    "Point 1 — specific, actionable talking point for an RM meeting",
+    "Point 1 — Specific, actionable private wealth / business talking point for an RM meeting",
     "Point 2",
     "Point 3",
     "Point 4",
     "Point 5"
   ],
-  "industryContext": "Brief industry context and recent trends relevant to the person's sector",
-  "relationshipOpportunities": "Specific opportunities for business relationship development",
-  "riskSignals": "Any risk signals or areas requiring caution (or 'None identified' if none)"
+  "industryContext": "Key industry dynamics, sector trends, or regulatory developments relevant to the target's business domain",
+  "relationshipOpportunities": "Specific high-value wealth management pitch hooks (e.g., Family Office advisory, Liquidity events, Succession planning, Real estate financing, Corporate treasury management)",
+  "riskSignals": "Any corporate risk signals, legal compliance warnings, or directorship flags (or 'None identified' if clean)"
 }
 
 Rules:
-- Maximum 5 talking points
-- Each point must be specific and actionable, not generic
-- Base everything ONLY on the provided intelligence — do not fabricate
-- If data is limited, say so honestly
-- Focus on what would help an RM prepare for a business meeting
-- Return ONLY the JSON object, no markdown fences or extra text`;
+- Maximum 5 talking points.
+- Talking points MUST be tailored for a Private Wealth / HNI Relationship Manager meeting.
+- Highlight any corporate directorships, capital scale, angel investments, or property holdings found in the intelligence.
+- Base everything ONLY on the provided intelligence — do not fabricate figures or facts.
+- Return ONLY the JSON object, no markdown fences or extra text.`;
 
 // ── Groq (Free, Fast — Llama 3.3 70B) ────────────────────
 

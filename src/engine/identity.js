@@ -151,6 +151,11 @@ function extractCoreWords(name) {
     .filter(w => w.length >= 2);
 }
 
+const EXECUTIVE_DESIGNATIONS = [
+  'promoter', 'managing director', 'md', 'director', 'chairman', 'co-founder',
+  'founder', 'ceo', 'trustee', 'partner', 'designated partner', 'general partner'
+];
+
 function generateSearchVariants(normalized) {
   const { full, first, last, middle } = normalized;
   const variants = [full];
@@ -163,6 +168,15 @@ function generateSearchVariants(normalized) {
       variants.push(`${first} ${middle.charAt(0)}. ${last}`);
     }
   }
+
+  // HNI & UHNI Wealth & Executive Search Query Variants
+  const hniVariants = [
+    `"${full}" promoter OR director OR founder`,
+    `"${full}" "family office" OR "holdings" OR "capital"`,
+    `"${full}" DIN OR Zauba OR Tofler OR "MCA"`,
+    `"${full}" angel investment OR startup OR investor`
+  ];
+  variants.push(...hniVariants);
 
   return [...new Set(variants)];
 }

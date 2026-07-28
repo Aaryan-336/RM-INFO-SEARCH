@@ -55,19 +55,39 @@ let browserInstance = null;
 export async function getBrowser() {
   if (browserInstance && browserInstance.connected) return browserInstance;
 
+  const proxy = process.env.PROXY_SERVER || process.env.HTTP_PROXY || process.env.HTTPS_PROXY;
+  const launchArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--disable-blink-features=AutomationControlled',
+    '--window-size=1280,900',
+  ];
+  if (proxy) {
+    launchArgs.push(`--proxy-server=${proxy}`);
+  }
+
   browserInstance = await puppeteer.launch({
     headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-blink-features=AutomationControlled',
-      '--window-size=1280,900',
-    ],
+    args: launchArgs,
   });
 
   return browserInstance;
+}
+
+export async function setupPageStealth(page) {
+  try {
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'sec-ch-ua': '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"macOS"',
+      'Upgrade-Insecure-Requests': '1',
+    });
+  } catch {
+    // Ignore header setting errors if page closed
+  }
 }
 
 export async function publicSearch(identity, logger) {
@@ -287,6 +307,8 @@ async function duckDuckGoSearch(page, identity, results, allSnippets, logger) {
     `"${identity.normalized.fullName}" ${companyQueryPart} contact email phone`,
     `"${identity.normalized.fullName}" ${companyQueryPart} email OR phone OR mobile`,
     `"${identity.normalized.fullName}" ${companyQueryPart} career OR experience OR biography OR background OR education`,
+    `"${identity.normalized.fullName}" promoter OR "family office" OR "angel investor" OR trustee OR "board of directors"`,
+    `"${identity.normalized.fullName}" Zauba OR Tofler OR "Economic Times" OR VCCircle OR Trendlyne`,
     `"${identity.normalized.fullName}" contact OR email OR phone OR mobile OR linkedin`, // Broad search without company constraints
     `"${identity.normalized.fullName}" "gmail.com" OR "yahoo.com" OR "hotmail.com"`,  // Personal email search
     `"${identity.normalized.fullName}" ${companyQueryPart} filetype:pdf`,
@@ -712,10 +734,104 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
     }
   }
 
+  // ── SERP Mirror Fallback (Bright Data Technique) ──
+  // If direct HTML fetch hit an authwall or returned low-confidence data, query SERP cache mirrors
+  if (!results.linkedinParsedData || results.linkedinParsedData.confidence < 0.3) {
+    try {
+      logger.running('Public Search', 'LinkedIn: Direct fetch authwalled — triggering Bright Data SERP Mirror Fallback...');
+      const serpParsed = await fetchLinkedInSerpMirror(linkedinUrl, identity, logger);
+      if (serpParsed && serpParsed.confidence > (results.linkedinParsedData?.confidence || 0)) {
+        results.linkedinParsedData = serpParsed;
+        logger.success('Public Search', `LinkedIn SERP Mirror: Recovered profile metadata for "${serpParsed.name || identity.normalized.fullName}"`);
+        
+        if (serpParsed.jobTitle && serpParsed.company) {
+          results.roles.push({
+            value: `${serpParsed.jobTitle} at ${serpParsed.company}`,
+            source: linkedinUrl,
+            sourceType: 'LinkedIn (SERP Mirror Fallback)',
+            confidence: CONFIDENCE.COMPANY_WEBSITE,
+            timestamp: new Date().toISOString(),
+          });
+          results.experience.push({
+            title: serpParsed.jobTitle,
+            company: serpParsed.company,
+            duration: 'Current',
+            source: 'LinkedIn (SERP Mirror Fallback)',
+            confidence: CONFIDENCE.COMPANY_WEBSITE,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      }
+    } catch (serpErr) {
+      logger.warning('Public Search', `LinkedIn SERP Mirror fallback error: ${serpErr.message}`);
+    }
+  }
+
   if (linkedinUrl) {
     results.linkedinProfile = linkedinUrl;
     results.pagesSearched.push(linkedinUrl);
   }
+}
+
+async function fetchLinkedInSerpMirror(linkedinUrl, identity, logger) {
+  const handleMatch = linkedinUrl.match(/linkedin\.com\/in\/([a-zA-Z0-9\-_%]+)/i);
+  const handle = handleMatch ? handleMatch[1] : null;
+
+  const queries = [
+    handle ? `site:linkedin.com/in/${handle}` : null,
+    `site:linkedin.com/in/ "${identity.normalized.fullName}" "${identity.company.normalized}"`
+  ].filter(Boolean);
+
+  for (const q of queries) {
+    try {
+      const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+      const res = await fetch(searchUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        signal: AbortSignal.timeout(6000),
+      });
+
+      if (res.ok) {
+        const text = await res.text();
+        const $ = cheerio.load(text);
+        const firstResult = $('.result__body').first();
+
+        if (firstResult.length) {
+          const titleText = firstResult.find('a.result__a').text().trim();
+          const snippetText = firstResult.find('.result__snippet').text().trim();
+
+          if (titleText && titleText.toLowerCase().includes('linkedin')) {
+            const virtualHtml = `
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <title>${titleText}</title>
+                <meta property="og:title" content="${titleText}" />
+                <meta property="og:description" content="${snippetText}" />
+                <meta property="og:url" content="${linkedinUrl}" />
+              </head>
+              <body>
+                <h1>${titleText}</h1>
+                <p>${snippetText}</p>
+              </body>
+              </html>
+            `;
+
+            const parsed = parsePublicLinkedInHtml(virtualHtml);
+            if (parsed && (parsed.name || parsed.jobTitle || parsed.headline)) {
+              return parsed;
+            }
+          }
+        }
+      }
+    } catch {
+      // Continue to next query if any fails
+    }
+  }
+
+  return null;
 }
 
 // Parse LinkedIn titles like:
@@ -1110,8 +1226,8 @@ async function extractExperienceWithAI(identity, snippets, primaryLinkedinUrl, l
     ? `- If a snippet references a LinkedIn profile URL that is different from "${primaryLinkedinUrl}", ignore that snippet. However, if the snippet references the primary LinkedIn URL or is from other sources (e.g. news, directories) without a LinkedIn URL, do NOT ignore it.`
     : `- If there are multiple different LinkedIn profile URLs in the snippets, verify that you only extract the career history of the target person "${identity.normalized.fullName}" who is associated with "${identity.company.normalized}". Do NOT ignore general company websites, news, or directory snippets that don't have a LinkedIn URL.`;
 
-  const prompt = `You are a precise professional biography and career history extractor.
-Given the following web search snippets about "${identity.normalized.fullName}" who works at "${identity.company.normalized}", extract their full career timeline (past and current job roles, companies, and durations).
+  const prompt = `You are a precise professional biography and executive career history extractor.
+Given the following web search snippets about "${identity.normalized.fullName}" who works at "${identity.company.normalized}", extract their full executive career timeline (past and current job roles, company directorships, board seats, trustee positions, angel investments, and family office affiliations).
 
 Target Information:
 - Primary LinkedIn Profile URL: ${primaryLinkedinUrl || 'Not provided/discovered'}
@@ -1125,8 +1241,8 @@ Generate a JSON response with exactly this structure:
 {
   "experience": [
     {
-      "title": "Exact Job Title (e.g. Senior Executive, Director, Associate)",
-      "company": "Company Name (e.g. ASK Private Wealth, Younity.in)",
+      "title": "Executive Title/Role (e.g. Managing Director, Promoter, Board Member, Angel Investor, Trustee)",
+      "company": "Company / Entity Name (e.g. ASK Wealth Advisors, Family Office, Startup Portfolio)",
       "duration": "Duration/Years if mentioned (e.g. 2022 - Present, or 3 years, or 'Present'), otherwise null"
     }
   ]
@@ -1134,6 +1250,7 @@ Generate a JSON response with exactly this structure:
 
 Rules:
 - Only include roles belonging to the target person "${identity.normalized.fullName}". Do not include roles of other individuals with different names.
+- Include corporate directorships, board seats, angel investments, and trustee positions in addition to standard employment roles.
 ${linkedinRule}
 - Verify that at least one current or past role links to "${identity.company.normalized}" or its core words/aliases. If a snippet is about an entirely different person (e.g. different industry/location/company with no links to the target company), ignore it.
 - Return ONLY the JSON object, no markdown or extra text.`;
