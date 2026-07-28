@@ -296,6 +296,34 @@ export function parsePublicLinkedInHtml(htmlString) {
   }
 
   // ─────────────────────────────────────────────────────────────
+  // SANITIZE AUTHWALL / SIGN UP POLLUTION
+  // ─────────────────────────────────────────────────────────────
+  if (result.name && (
+      result.name.toLowerCase().includes('sign up') || 
+      result.name.toLowerCase().includes('log in') || 
+      result.name.toLowerCase().includes('join linkedin') ||
+      result.name.toLowerCase() === 'linkedin'
+  )) {
+    result.name = null;
+  }
+
+  if (result.headline && (
+      result.headline.toLowerCase().includes('750 million') || 
+      result.headline.toLowerCase().includes('manage your professional identity') ||
+      result.headline.toLowerCase().includes('access knowledge, insights')
+  )) {
+    result.headline = null;
+  }
+
+  if (result.image && (
+      result.image.includes('static.licdn.com/sc/h/') || 
+      result.image.includes('linkedin-logo') ||
+      result.image.includes('ghost')
+  )) {
+    result.image = null;
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // CONFIDENCE SCORE COMPUTATION (0 to 1.0)
   // ─────────────────────────────────────────────────────────────
   let score = 0;
@@ -338,15 +366,22 @@ function normalizeLinkedInUrl(url) {
 function parseLinkedInTitleString(titleString) {
   if (!titleString) return null;
 
+  const lower = titleString.toLowerCase();
+  if (lower.includes('sign up') || lower.includes('log in') || lower.includes('join linkedin') || lower.includes('750 million')) {
+    return null;
+  }
+
   // Clean " | LinkedIn" suffix
   let title = titleString.replace(/\s*[|–-]\s*(LinkedIn|Profiles?)\.?$/i, '').trim();
 
   // Typical format: "Name - Headline" or "Name - Job Title at Company"
   const parts = title.split(/\s+-\s+/);
-  if (parts.length < 2) return { name: title, headline: null };
+  if (parts.length < 2) return { name: title, headline: null, jobTitle: null, company: null };
 
   const name = parts[0].trim();
   const headline = parts.slice(1).join(' - ').trim();
+
+  if (name.toLowerCase() === 'sign up' || name.toLowerCase() === 'log in') return null;
 
   let jobTitle = null;
   let company = null;

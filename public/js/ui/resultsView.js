@@ -48,10 +48,13 @@ function renderExecutiveHeroCard(data) {
   const { query, person, company, directors, socialLinks } = data;
   const parsed = person?.linkedinParsedData || {};
 
-  const name = parsed.name || query.personName;
-  const headline = parsed.headline || (person?.roles?.[0]?.value ? `${person.roles[0].value}` : `${query.companyName}`);
+  const isInvalidName = (n) => !n || n.toLowerCase().includes('sign up') || n.toLowerCase().includes('log in') || n.toLowerCase() === 'linkedin';
+  const isInvalidHeadline = (h) => !h || h.toLowerCase().includes('750 million') || h.toLowerCase().includes('manage your professional identity');
+
+  const name = !isInvalidName(parsed.name) ? parsed.name : query.personName;
+  const headline = !isInvalidHeadline(parsed.headline) ? parsed.headline : (person?.roles?.[0]?.value ? `${person.roles[0].value}` : `${query.companyName}`);
   const location = parsed.location || (company?.registeredAddress?.city ? `${company.registeredAddress.city}, India` : 'Mumbai, Maharashtra, India');
-  const image = parsed.image || null;
+  const image = (parsed.image && !parsed.image.includes('static.licdn.com') && !parsed.image.includes('linkedin-logo')) ? parsed.image : null;
 
   const initials = name
     .split(' ')
