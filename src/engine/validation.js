@@ -14,6 +14,7 @@ export async function validateContacts(allContacts, identity, logger) {
     phones: [],
     emails: [],
     roles: [],
+    uanNumbers: allContacts.publicSearch?.uanNumbers || [],
   };
 
   // ── Phone Validation ──────────────────────────────────────
@@ -111,17 +112,28 @@ export async function validateContacts(allContacts, identity, logger) {
         }
         // If 'neutral', keep the existing confidence as-is
 
+        // Flag generated / unconfirmed candidate emails or catch-all domain emails
+        const isCandidate = email.sourceType === 'Search Verified Candidate' || email.source === 'Search Verification';
+        const isCatchAll = validationResult.isCatchAll || isCandidate;
+        let validationStatus = validationResult.mxValid ? 'MX Verified' : 'Format Valid';
+
+        if (isCatchAll) {
+          validationStatus = 'plausible guess, not confirmed';
+          confidence = Math.min(confidence, 0.70); // Capped confidence for catch-all / unconfirmed candidates
+        }
+
         emailMap.set(normalizedEmail, {
           value: normalizedEmail,
           domain: validationResult.domain,
           mxValid: validationResult.mxValid,
           companyDomainMatch: validationResult.companyDomainMatch,
           nameCorrelation,
+          isCatchAll,
           sources: [email.source],
           sourceType: email.sourceType,
           confidence,
           crossVerified: false,
-          validationStatus: validationResult.mxValid ? 'MX Verified' : 'Format Valid',
+          validationStatus,
           timestamp: email.timestamp,
         });
       }
@@ -159,6 +171,15 @@ export async function validateContacts(allContacts, identity, logger) {
   validated.phones.sort((a, b) => b.confidence - a.confidence);
   validated.emails.sort((a, b) => b.confidence - a.confidence);
 
+  // ── Temporal Consistency Check (MCA vs LinkedIn) ─────────────
+  const mcaDirectors = allContacts.mca?.directors || [];
+  const linkedinExperience = allContacts.publicSearch?.experience || [];
+  validated.temporalConsistency = checkTemporalConsistency(mcaDirectors, linkedinExperience);
+
+  if (validated.temporalConsistency.discrepancies.length > 0) {
+    logger.warning('Validation', `Temporal consistency notice: ${validated.temporalConsistency.discrepancies.length} date mismatch(es) / gap(s) flagged`);
+  }
+
   const duration = Date.now() - start;
   const hiddenCount = (rawPhones.length - validated.phones.length) + (rawEmails.length - validated.emails.length);
 
@@ -168,6 +189,64 @@ export async function validateContacts(allContacts, identity, logger) {
   );
 
   return validated;
+}
+
+/**
+ * Cross-references Stage 2 MCA director appointment/cessation dates against Stage 3 LinkedIn timeline entries
+ */
+export function checkTemporalConsistency(mcaDirectors = [], linkedinExperience = []) {
+  const report = {
+    consistent: true,
+    mcaRecordsCount: mcaDirectors.length,
+    linkedinRecordsCount: linkedinExperience.length,
+    discrepancies: [],
+  };
+
+  if (mcaDirectors.length === 0 || linkedinExperience.length === 0) {
+    return report;
+  }
+
+  for (const dir of mcaDirectors) {
+    const appDateStr = dir.appointmentDate || dir.appointment_date || '';
+    const compName = dir.companyName || dir.company_name || dir.company || '';
+    if (!compName) continue;
+
+    const matchedLinkedIn = linkedinExperience.find(exp =>
+      exp.company && (exp.company.toLowerCase().includes(compName.toLowerCase()) || compName.toLowerCase().includes(exp.company.toLowerCase()))
+    );
+
+    if (!matchedLinkedIn) {
+      report.discrepancies.push({
+        type: 'Missing LinkedIn Experience',
+        company: compName,
+        mcaAppointmentDate: appDateStr || 'N/A',
+        details: `Official MCA directorship at "${compName}" not listed in LinkedIn timeline`,
+      });
+      report.consistent = false;
+    } else {
+      // Check date overlaps if appointment date exists
+      const appYearMatch = appDateStr.match(/\b(19|20)\d{2}\b/);
+      if (appYearMatch && matchedLinkedIn.duration) {
+        const appYear = parseInt(appYearMatch[0], 10);
+        const liYearMatch = matchedLinkedIn.duration.match(/\b(19|20)\d{2}\b/);
+        if (liYearMatch) {
+          const liStartYear = parseInt(liYearMatch[0], 10);
+          if (Math.abs(appYear - liStartYear) > 2) {
+            report.discrepancies.push({
+              type: 'Date Mismatch',
+              company: compName,
+              mcaAppointmentYear: appYear,
+              linkedInStartYear: liStartYear,
+              details: `MCA directorship appointment (${appYear}) differs from LinkedIn start year (${liStartYear}) by > 2 years`,
+            });
+            report.consistent = false;
+          }
+        }
+      }
+    }
+  }
+
+  return report;
 }
 
 

@@ -366,19 +366,49 @@ function normalizeLinkedInUrl(url) {
   return url;
 }
 
+export function parseHeadlineJobTitleAndCompany(headline) {
+  if (!headline || typeof headline !== 'string') return { jobTitle: null, company: null };
+
+  const mainClause = headline.split(/[.|;\n]/)[0].trim();
+
+  if (/\s+(?:at|@)\s+/i.test(mainClause)) {
+    const parts = mainClause.split(/\s+(?:at|@)\s+/i);
+    if (parts.length >= 2) {
+      return {
+        jobTitle: parts[0].trim(),
+        company: parts[1].split(/[|•,-]/)[0].trim()
+      };
+    }
+  }
+
+  const dashParts = mainClause.split(/\s+[-–|•]\s+/);
+  if (dashParts.length >= 2) {
+    return {
+      jobTitle: dashParts[0].trim(),
+      company: dashParts[1].split(/[|•,]/)[0].trim()
+    };
+  }
+
+  return { jobTitle: null, company: null };
+}
+
 function parseLinkedInTitleString(titleString) {
-  if (!titleString) return null;
+  if (!titleString || typeof titleString !== 'string') return null;
 
   const lower = titleString.toLowerCase();
   if (lower.includes('sign up') || lower.includes('log in') || lower.includes('join linkedin') || lower.includes('750 million')) {
     return null;
   }
 
-  // Clean " | LinkedIn" suffix
+  // Clean " | LinkedIn" or "- LinkedIn" suffix
   let title = titleString.replace(/\s*[|–-]\s*(LinkedIn|Profiles?)\.?$/i, '').trim();
 
-  // Typical format: "Name - Headline" or "Name - Job Title at Company"
-  const parts = title.split(/\s+-\s+/);
+  // Typical format: "Name - Job Title - Company" or "Name - Job Title at Company" or "Name | Job Title | Company"
+  let parts = title.split(/\s+[-–|•]\s+/);
+  if (parts.length < 2) {
+    parts = title.split(/\s+(?:at|@)\s+/i);
+  }
+
   if (parts.length < 2) return { name: title, headline: null, jobTitle: null, company: null };
 
   const name = parts[0].trim();
@@ -389,12 +419,28 @@ function parseLinkedInTitleString(titleString) {
   let jobTitle = null;
   let company = null;
 
-  if (headline.includes(' at ')) {
-    const atParts = headline.split(/\s+at\s+/i);
-    if (atParts.length >= 2) {
+  if (parts.length >= 3) {
+    jobTitle = parts[1].trim();
+    company = parts[2].split(/[|•,]/)[0].trim();
+  } else if (parts.length === 2) {
+    const secondPart = parts[1].trim();
+    if (/\s+(?:at|@)\s+/i.test(secondPart)) {
+      const atParts = secondPart.split(/\s+(?:at|@)\s+/i);
       jobTitle = atParts[0].trim();
       company = atParts[1].split(/[|•,]/)[0].trim();
+    } else if (secondPart.includes(',')) {
+      const commaParts = secondPart.split(',');
+      jobTitle = commaParts[0].trim();
+      company = commaParts.slice(1).join(',').split(/[|•]/)[0].trim();
+    } else {
+      jobTitle = secondPart;
     }
+  }
+
+  if (!jobTitle && headline) {
+    const parsedFromHeadline = parseHeadlineJobTitleAndCompany(headline);
+    jobTitle = parsedFromHeadline.jobTitle;
+    if (!company) company = parsedFromHeadline.company;
   }
 
   return { name, headline, jobTitle, company };

@@ -69,6 +69,17 @@ export function runComplianceChecks(validatedData, mcaData, logger) {
     }
   }
 
+  // Check UAN / EPFO numbers (moved out of public contact cascade into compliance human review)
+  if (validatedData.uanNumbers && validatedData.uanNumbers.length > 0) {
+    report.uanCompliance = {
+      count: validatedData.uanNumbers.length,
+      requiresHumanReview: true,
+      status: 'FLAGGED_FOR_HUMAN_REVIEW',
+      message: `${validatedData.uanNumbers.length} UAN/EPFO record(s) flagged for manual human review — excluded from automated contact list`,
+    };
+    logger.warning('Compliance', `UAN/EPFO: ${validatedData.uanNumbers.length} record(s) flagged for manual human compliance review`);
+  }
+
   // Determine overall status
   if (report.removedFields > 0) {
     report.status = report.compliantFields > 0 ? 'PARTIAL' : 'FAIL';

@@ -3,26 +3,28 @@
 // Only triggered when public search + OCR didn't find phone or email
 
 import { CONFIDENCE, ATTRIBUTION } from '../utils/confidence.js';
+import { tryBrightDataEnrichment } from './brightdata.js';
 
 export async function enrichContacts(identity, existingContacts, logger) {
   const start = Date.now();
 
+  const results = { emails: [], phones: [], profiles: [] };
+
   const hasEmail = existingContacts.emails && existingContacts.emails.length > 0;
   const hasPhone = existingContacts.phones && existingContacts.phones.length > 0;
 
-  if (hasEmail && hasPhone) {
+  if (hasEmail && hasPhone && !process.env.BRIGHTDATA_API_KEY) {
     logger.skipped('Contact Enrichment', 'Sufficient contacts found from public sources — skipping enrichment');
-    return { emails: [], phones: [], profiles: [] };
+    return results;
   }
 
-  logger.running('Contact Enrichment', 'Public sources insufficient — trying enrichment providers (fallback)');
+  logger.running('Contact Enrichment', 'Executing contact & profile enrichment cascade...');
 
-  const results = { emails: [], phones: [], profiles: [] };
-
-  // Cascade through providers
+  // Cascade through providers (Bright Data prioritized first when configured)
   const providers = [
-    { name: 'Apify Google Search', fn: tryApify, keyEnv: 'APIFY_TOKEN', confidence: CONFIDENCE.PUBLIC_DIRECTORY },
+    { name: 'Bright Data API', fn: tryBrightDataEnrichment, keyEnv: 'BRIGHTDATA_API_KEY', confidence: CONFIDENCE.BRIGHTDATA || 0.95 },
     { name: 'Apollo', fn: tryApollo, keyEnv: 'APOLLO_API_KEY', confidence: CONFIDENCE.APOLLO },
+    { name: 'Apify Google Search', fn: tryApify, keyEnv: 'APIFY_TOKEN', confidence: CONFIDENCE.PUBLIC_DIRECTORY },
     { name: 'Hunter.io', fn: tryHunter, keyEnv: 'HUNTER_API_KEY', confidence: CONFIDENCE.HUNTER },
     { name: 'RocketReach', fn: tryRocketReach, keyEnv: 'ROCKETREACH_API_KEY', confidence: CONFIDENCE.ROCKETREACH },
     { name: 'People Data Labs', fn: tryPDL, keyEnv: 'PDL_API_KEY', confidence: CONFIDENCE.PDL },
@@ -37,22 +39,23 @@ export async function enrichContacts(identity, existingContacts, logger) {
 
     try {
       logger.running('Contact Enrichment', `Trying ${provider.name}...`);
-      const providerResult = await provider.fn(identity, apiKey, provider.confidence);
+      const providerResult = await provider.fn(identity, apiKey, provider.confidence, logger);
 
       if (providerResult) {
-        if (providerResult.email && !hasEmail) {
+        if (providerResult.email) {
           results.emails.push(providerResult.email);
-          logger.success('Contact Enrichment', `${provider.name}: Found email`, { confidence: provider.confidence });
+          logger.success('Contact Enrichment', `${provider.name}: Found verified email`, { confidence: provider.confidence });
         }
-        if (providerResult.phone && !hasPhone) {
+        if (providerResult.phone) {
           results.phones.push(providerResult.phone);
-          logger.success('Contact Enrichment', `${provider.name}: Found phone`, { confidence: provider.confidence });
+          logger.success('Contact Enrichment', `${provider.name}: Found phone number`, { confidence: provider.confidence });
         }
         if (providerResult.profile) {
           results.profiles.push(providerResult.profile);
+          logger.success('Contact Enrichment', `${provider.name}: Fetched full person profile metadata & employment timeline`);
         }
 
-        // Stop cascade if we have both
+        // Stop cascade if we have both email and phone
         const nowHasEmail = hasEmail || results.emails.length > 0;
         const nowHasPhone = hasPhone || results.phones.length > 0;
         if (nowHasEmail && nowHasPhone) {
@@ -66,11 +69,11 @@ export async function enrichContacts(identity, existingContacts, logger) {
   }
 
   const duration = Date.now() - start;
-  const totalFound = results.emails.length + results.phones.length;
+  const totalFound = results.emails.length + results.phones.length + results.profiles.length;
 
   if (totalFound > 0) {
     logger.success('Contact Enrichment',
-      `Enrichment found ${results.emails.length} email(s), ${results.phones.length} phone(s)`,
+      `Enrichment found ${results.emails.length} email(s), ${results.phones.length} phone(s), ${results.profiles.length} profile(s)`,
       { durationMs: duration }
     );
   } else {
@@ -80,14 +83,17 @@ export async function enrichContacts(identity, existingContacts, logger) {
   return results;
 }
 
-// ─── Apollo (Free: 50 credits/month) ──────────────────────────
+// ─── Apollo (Requires Paid Plan for API access) ───────────────
 
-async function tryApollo(identity, apiKey, confidence) {
+async function tryApollo(identity, apiKey, confidence, logger) {
   const url = 'https://api.apollo.io/v1/people/match';
   const body = {
+    api_key: apiKey,
     first_name: identity.normalized.firstName,
     last_name: identity.normalized.lastName,
-    organization_name: identity.company.normalized,
+    organization_name: identity.company.officialName || identity.company.normalized,
+    reveal_personal_emails: true,
+    reveal_phone_number: true,
   };
   if (identity.linkedinUrl) {
     body.linkedin_url = identity.linkedinUrl;
@@ -104,7 +110,13 @@ async function tryApollo(identity, apiKey, confidence) {
     signal: AbortSignal.timeout(10000),
   });
 
-  if (!res.ok) return null;
+  if (!res.ok) {
+    const errorText = await res.text().catch(() => '');
+    if (res.status === 403 || errorText.includes('API_INACCESSIBLE')) {
+      throw new Error(`Apollo API error: Access forbidden (API endpoints require an active Apollo Paid Plan: Basic/Professional)`);
+    }
+    throw new Error(`HTTP ${res.status}: ${errorText.substring(0, 100)}`);
+  }
 
   const data = await res.json();
   const person = data.person;
@@ -116,7 +128,7 @@ async function tryApollo(identity, apiKey, confidence) {
     result.email = {
       value: person.email,
       source: 'Apollo',
-      sourceType: 'Enrichment Provider (Apollo)',
+      sourceType: 'Enrichment Provider (Apollo API)',
       confidence,
       attribution: ATTRIBUTION.ENRICHMENT_API,
       timestamp: new Date().toISOString(),
@@ -124,23 +136,38 @@ async function tryApollo(identity, apiKey, confidence) {
   }
 
   if (person.phone_numbers && person.phone_numbers.length > 0) {
+    const p = person.phone_numbers[0];
     result.phone = {
-      value: person.phone_numbers[0].sanitized_number || person.phone_numbers[0].raw_number,
+      value: p.sanitized_number || p.raw_number,
       source: 'Apollo',
-      sourceType: 'Enrichment Provider (Apollo)',
+      sourceType: 'Enrichment Provider (Apollo API)',
       confidence,
       attribution: ATTRIBUTION.ENRICHMENT_API,
       timestamp: new Date().toISOString(),
     };
   }
 
+  // Parse multi-year career history array from Apollo
+  const history = (person.employment_history || []).map(h => ({
+    title: h.title,
+    company: h.organization_name,
+    duration: h.start_date ? `${h.start_date.substring(0, 4)} - ${h.is_current ? 'Present' : (h.end_date ? h.end_date.substring(0, 4) : 'N/A')}` : 'N/A',
+    source: 'Apollo API',
+    confidence,
+    timestamp: new Date().toISOString()
+  }));
+
   result.profile = {
+    name: person.name || `${identity.normalized.firstName} ${identity.normalized.lastName}`,
     title: person.title,
-    headline: person.headline,
+    headline: person.headline || (person.title && person.organization?.name ? `${person.title} at ${person.organization.name}` : null),
     linkedin: person.linkedin_url,
     city: person.city,
+    state: person.state,
     country: person.country,
     organization: person.organization?.name,
+    photoUrl: person.photo_url,
+    employmentHistory: history,
     source: 'Apollo',
     confidence,
     timestamp: new Date().toISOString(),

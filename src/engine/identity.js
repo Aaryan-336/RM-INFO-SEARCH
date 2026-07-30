@@ -225,10 +225,16 @@ function generateCompanyDomains(company) {
     addDomainExtensions(rawWords.join('-'));
   }
 
-  // 5. Acronyms/Shorthand
+  // 5. Acronyms/Shorthand & Common Corporate Suffix Expansions
   if (filteredWords.length > 1) {
     const acronym = filteredWords.map(w => w.charAt(0)).join('');
     addDomainExtensions(acronym);
+
+    // Expand with common corporate domains (e.g. askwealth -> askwealthadvisors.com, askgroup.in)
+    addDomainExtensions(`${filteredBase}advisors`);
+    addDomainExtensions(`${filteredBase}group`);
+    addDomainExtensions(`${filteredBase}capital`);
+    addDomainExtensions(`${filteredBase}wealth`);
   }
 
   return [...domains];

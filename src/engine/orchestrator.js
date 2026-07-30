@@ -11,6 +11,7 @@ import { runComplianceChecks } from './compliance.js';
 import { generateBriefing } from './briefing.js';
 import { scrapeIGRProperties } from './igrScraper.js';
 import { createLogger, STAGES } from '../utils/logger.js';
+import { computeNameSimilarity } from '../utils/confidence.js';
 
 export async function runPipeline(personName, companyName, linkedinUrl, onLog) {
   const pipelineStart = Date.now();
@@ -103,6 +104,16 @@ export async function runPipeline(personName, companyName, linkedinUrl, onLog) {
     const searchResults = await publicSearch(identity, logger);
     result.socialLinks = searchResults.socialLinks || [];
 
+    // Public Search Fusion Guardrail: Apply fuzzy name-match + company check to all public search outputs
+    if (searchResults.linkedinParsedData?.name) {
+      const sim = computeNameSimilarity(searchResults.linkedinParsedData.name, identity.normalized.fullName);
+      if (sim < 0.60) {
+        logger.warning('Public Search Guardrail', `LinkedIn profile name mismatch ("${searchResults.linkedinParsedData.name}" vs "${identity.normalized.fullName}") — penalizing confidence`);
+        searchResults.linkedinParsedData.nameMismatch = true;
+        searchResults.linkedinParsedData.confidence = Math.min(searchResults.linkedinParsedData.confidence || 0.5, 0.25);
+      }
+    }
+
     if (searchResults.linkedinProfile && !identity.linkedinUrl) {
       identity.linkedinUrl = searchResults.linkedinProfile;
       logger.success('Identity Resolution', `LinkedIn URL discovered and verified: ${identity.linkedinUrl}`);
@@ -128,6 +139,7 @@ export async function runPipeline(personName, companyName, linkedinUrl, onLog) {
     result.contacts = {
       phones: validated.phones,
       emails: validated.emails,
+      uanNumbers: validated.uanNumbers || [],
     };
     result.person.roles = validated.roles;
     result.person.bios = searchResults.bios || [];
@@ -135,7 +147,7 @@ export async function runPipeline(personName, companyName, linkedinUrl, onLog) {
     result.person.education = searchResults.education || [];
     result.person.linkedinParsedData = searchResults.linkedinParsedData || null;
 
-    // Add enrichment profile data
+    // Add enrichment profile data (Apollo / Hunter / PDL)
     for (const profile of allProfiles) {
       if (profile.linkedin) {
         result.socialLinks.push({ platform: 'LinkedIn', url: profile.linkedin, source: profile.source });
@@ -148,6 +160,24 @@ export async function runPipeline(personName, companyName, linkedinUrl, onLog) {
           confidence: profile.confidence,
           timestamp: profile.timestamp,
         });
+      }
+      if (profile.employmentHistory && profile.employmentHistory.length > 0) {
+        for (const exp of profile.employmentHistory) {
+          if (!result.person.experience.some(e => e.company?.toLowerCase() === exp.company?.toLowerCase() && e.title?.toLowerCase() === exp.title?.toLowerCase())) {
+            result.person.experience.push(exp);
+          }
+        }
+      }
+      if (!result.person.linkedinParsedData && profile.headline) {
+        result.person.linkedinParsedData = {
+          name: profile.name,
+          headline: profile.headline,
+          jobTitle: profile.title,
+          company: profile.organization,
+          location: profile.city ? `${profile.city}, ${profile.state || profile.country || ''}` : null,
+          image: profile.photoUrl,
+          profileUrl: profile.linkedin
+        };
       }
     }
 

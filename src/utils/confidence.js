@@ -7,6 +7,7 @@ export const CONFIDENCE = {
   COMPANY_WEBSITE: 0.98,
   COMPANY_PDF: 0.95,
   CONFERENCE_BROCHURE: 0.90,
+  BRIGHTDATA: 0.95,
   APOLLO: 0.90,
   HUNTER: 0.88,
   ROCKETREACH: 0.88,
@@ -64,3 +65,55 @@ export function boostConfidence(score, matchCount) {
 export function meetsThreshold(score) {
   return score >= CONFIDENCE.DISPLAY_THRESHOLD;
 }
+
+/**
+ * Computes fuzzy name similarity score (0.0 to 1.0) combining token overlap and Levenshtein distance ratio.
+ */
+export function computeNameSimilarity(name1, name2) {
+  if (!name1 || !name2) return 0;
+  
+  const clean = (str) => str.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().split(/\s+/).filter(Boolean);
+  const tokens1 = clean(name1);
+  const tokens2 = clean(name2);
+
+  if (tokens1.length === 0 || tokens2.length === 0) return 0;
+
+  // Jaccard token overlap score
+  const set1 = new Set(tokens1);
+  const set2 = new Set(tokens2);
+  const intersection = new Set([...set1].filter(x => set2.has(x)));
+  const union = new Set([...set1, ...set2]);
+  const jaccardScore = intersection.size / union.size;
+
+  // Levenshtein similarity ratio
+  const str1 = tokens1.join(' ');
+  const str2 = tokens2.join(' ');
+  const distance = levenshteinDistance(str1, str2);
+  const maxLen = Math.max(str1.length, str2.length);
+  const levenshteinScore = maxLen > 0 ? (1 - distance / maxLen) : 0;
+
+  // Return highest of Jaccard and Levenshtein score
+  return Math.min(1.0, Math.max(jaccardScore, levenshteinScore));
+}
+
+function levenshteinDistance(a, b) {
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+

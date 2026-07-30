@@ -60,7 +60,8 @@ export class EnginePanel {
   }
 
   renderLogEntry(log) {
-    const time = new Date(log.timestamp).toLocaleTimeString('en-IN', {
+    const ts = log.timestamp ? new Date(log.timestamp) : new Date();
+    const time = isNaN(ts.getTime()) ? '' : ts.toLocaleTimeString('en-IN', {
       hour12: false,
       hour: '2-digit',
       minute: '2-digit',

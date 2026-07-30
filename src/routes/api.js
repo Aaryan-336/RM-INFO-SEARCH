@@ -3,6 +3,7 @@
 
 import { Router } from 'express';
 import { runPipeline } from '../engine/orchestrator.js';
+import { runAffluenseContactEngine } from '../engine/affluenseContactEngine.js';
 
 const router = Router();
 
@@ -68,11 +69,60 @@ router.post('/intelligence', async (req, res) => {
   }
 });
 
+// POST /api/affluense-contact — dedicated Affluense Contact Engine tab
+router.post('/affluense-contact', async (req, res) => {
+  const { personName, companyName, linkedinUrl, country } = req.body;
+
+  if (!personName || !companyName) {
+    return res.status(400).json({ error: 'Both personName and companyName are required' });
+  }
+
+  const requestId = `affluense-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+
+  const onLog = (entry) => {
+    entry.requestId = requestId;
+    const clients = sseClients.get(requestId) || [];
+    for (const client of clients) {
+      client.write(`data: ${JSON.stringify(entry)}\n\n`);
+    }
+  };
+
+  try {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Request-Id': requestId,
+    });
+
+    if (!sseClients.has(requestId)) {
+      sseClients.set(requestId, []);
+    }
+    sseClients.get(requestId).push(res);
+
+    res.write(`data: ${JSON.stringify({ layer: 'Engine', status: 'running', message: 'Starting Affluense Contact Intelligence Engine...', requestId })}\n\n`);
+
+    const result = await runAffluenseContactEngine(personName, companyName, linkedinUrl, country || 'IN', onLog);
+
+    res.write(`data: ${JSON.stringify({ type: 'result', data: result })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+    res.end();
+
+    sseClients.delete(requestId);
+  } catch (err) {
+    const errorEvent = { type: 'error', message: err.message };
+    res.write(`data: ${JSON.stringify(errorEvent)}\n\n`);
+    res.end();
+    sseClients.delete(requestId);
+  }
+});
+
 // Health check
 router.get('/health', (req, res) => {
   const keys = {
     groq: !!process.env.GROQ_API_KEY,
     gemini: !!process.env.GEMINI_API_KEY,
+    brightdata: !!process.env.BRIGHTDATA_API_KEY,
     apollo: !!process.env.APOLLO_API_KEY,
     hunter: !!process.env.HUNTER_API_KEY,
     rocketreach: !!process.env.ROCKETREACH_API_KEY,

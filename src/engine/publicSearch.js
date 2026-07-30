@@ -9,6 +9,7 @@ import * as cheerio from 'cheerio';
 import { CONFIDENCE, ATTRIBUTION, computeFinalConfidence } from '../utils/confidence.js';
 import { callGroqWithFallback } from '../utils/groq.js';
 import { parsePublicLinkedInHtml } from './linkedinParser.js';
+import { isApifyLinkedInConfigured, scrapeLinkedInProfileWithApify } from './linkedinApify.js';
 
 const CONTACT_PAGE_PATHS = [
   '/about', '/about-us', '/team', '/our-team', '/leadership',
@@ -106,6 +107,7 @@ export async function publicSearch(identity, logger) {
     linkedinParsedData: null,
     experience: [],
     education: [],
+    uanNumbers: [],
   };
 
   let browser;
@@ -224,12 +226,13 @@ export async function publicSearch(identity, logger) {
       }
     }
 
-    // AI-Powered career history extraction from accumulated signals
+    // AI-Powered career history & education extraction from accumulated signals
     if (allSnippets.length > 0) {
-      logger.running('Public Search', 'Extracting full career timeline using AI...');
-      const aiExperience = await extractExperienceWithAI(identity, allSnippets, results.linkedinProfile, logger);
-      if (aiExperience && aiExperience.length > 0) {
-        for (const exp of aiExperience) {
+      logger.running('Public Search', 'Extracting full career timeline & education history using AI...');
+      const aiData = await extractExperienceWithAI(identity, allSnippets, results.linkedinProfile, logger);
+      
+      if (aiData?.experience && aiData.experience.length > 0) {
+        for (const exp of aiData.experience) {
           if (exp.company && exp.title) {
             if (!results.experience.some(e => 
               e.company.toLowerCase() === exp.company.toLowerCase() &&
@@ -242,6 +245,24 @@ export async function publicSearch(identity, logger) {
                 source: 'AI Career Extraction',
                 confidence: CONFIDENCE.PUBLIC_DIRECTORY,
                 timestamp: new Date().toISOString(),
+              });
+            }
+          }
+        }
+      }
+
+      if (aiData?.education && aiData.education.length > 0) {
+        for (const edu of aiData.education) {
+          if (edu.institution) {
+            if (!results.education.some(e => e.institution.toLowerCase() === edu.institution.toLowerCase())) {
+              results.education.push({
+                institution: edu.institution,
+                degree: edu.degree || 'Degree',
+                fieldOfStudy: edu.fieldOfStudy || '',
+                duration: edu.duration || '',
+                source: 'AI Education Extraction',
+                confidence: CONFIDENCE.PUBLIC_DIRECTORY,
+                timestamp: new Date().toISOString()
               });
             }
           }
@@ -304,13 +325,10 @@ async function duckDuckGoSearch(page, identity, results, allSnippets, logger) {
     : `"${originalTerm}"`;
 
   const queries = [
-    `"${identity.normalized.fullName}" ${companyQueryPart} contact email phone`,
-    `"${identity.normalized.fullName}" ${companyQueryPart} email OR phone OR mobile`,
+    `"${identity.normalized.fullName}" ${companyQueryPart} contact OR email OR phone OR mobile`,
     `"${identity.normalized.fullName}" ${companyQueryPart} career OR experience OR biography OR background OR education`,
     `"${identity.normalized.fullName}" promoter OR "family office" OR "angel investor" OR trustee OR "board of directors"`,
-    `"${identity.normalized.fullName}" Zauba OR Tofler OR "Economic Times" OR VCCircle OR Trendlyne`,
-    `"${identity.normalized.fullName}" contact OR email OR phone OR mobile OR linkedin`, // Broad search without company constraints
-    `"${identity.normalized.fullName}" "gmail.com" OR "yahoo.com" OR "hotmail.com"`,  // Personal email search
+    `"${identity.normalized.fullName}" (site:zaubacorp.com OR site:tofler.in OR site:economictimes.indiatimes.com OR site:vccircle.com OR site:trendlyne.com)`,
     `"${identity.normalized.fullName}" ${companyQueryPart} filetype:pdf`,
   ];
 
@@ -489,6 +507,120 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
   results.linkedinProfile = linkedinUrl;
   results.pagesSearched.push(linkedinUrl);
 
+  // ── Apify Scraper: Populate Hero Header Card & Full Profile Dataset ──
+  if (isApifyLinkedInConfigured()) {
+    try {
+      logger.running('Public Search', `LinkedIn: Fetching full profile dataset & Hero Header via Apify Profile Scraper (${linkedinUrl})...`);
+      const apifyResult = await scrapeLinkedInProfileWithApify(linkedinUrl, logger, identity?.normalized?.fullName);
+      if (apifyResult) {
+        results.linkedinParsedData = apifyResult;
+
+        const apCompany = typeof apifyResult.company === 'string' 
+          ? apifyResult.company 
+          : (apifyResult.company?.name || identity.company.officialName || identity.company.normalized);
+
+        const apJobTitle = apifyResult.jobTitle || 'Executive';
+        const apHeadline = apifyResult.headline || `${apJobTitle} at ${apCompany}`;
+
+        if (apJobTitle || apCompany) {
+          const roleVal = [apJobTitle, apCompany ? `at ${apCompany}` : null].filter(Boolean).join(' ');
+          if (!results.roles.some(r => r.value === roleVal)) {
+            results.roles.unshift({
+              value: roleVal,
+              source: 'Apify LinkedIn Profile Scraper',
+              sourceType: 'Apify Profile Dataset',
+              confidence: apifyResult.confidence || 0.85,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        }
+
+        if (apHeadline) results.bios.push(apHeadline);
+
+        if (Array.isArray(apifyResult.experience)) {
+          for (const exp of apifyResult.experience) {
+            if (!results.experience.some(e => e.company?.toLowerCase() === exp.company?.toLowerCase() && e.title?.toLowerCase() === exp.title?.toLowerCase())) {
+              results.experience.push(exp);
+            }
+          }
+        }
+
+        if (Array.isArray(apifyResult.education)) {
+          for (const edu of apifyResult.education) {
+            if (!results.education.some(e => e.institution?.toLowerCase() === edu.institution?.toLowerCase())) {
+              results.education.push(edu);
+            }
+          }
+        }
+
+        if (Array.isArray(apifyResult.skills)) results.skills = apifyResult.skills;
+        if (Array.isArray(apifyResult.emails)) results.emails.push(...apifyResult.emails);
+        if (Array.isArray(apifyResult.related_profiles)) results.relatedProfiles = apifyResult.related_profiles;
+
+        logger.success('Public Search', `LinkedIn: Extracted Hero Header & profile details via Apify Scraper (${apifyResult.experience?.length || 0} experience, ${apifyResult.education?.length || 0} education entries)`);
+        return; // Complete — Apify Scraper provided profile data!
+      }
+    } catch (apErr) {
+      logger.warning('Public Search', `Apify LinkedIn extraction notice: ${apErr.message}`);
+    }
+  } else {
+    logger.skipped('Public Search', 'LinkedIn: APIFY_API_TOKEN not configured — using standard browser scraper');
+  }
+
+  // ── Step 2: Extract ONLY AND ONLY Current Work from JSON-LD & Meta Tags ──
+  try {
+    logger.running('Public Search', 'LinkedIn: Extracting ONLY current work designation from JSON-LD & Meta Tags...');
+    
+    let metaHtml = null;
+    try {
+      const res = await fetch(linkedinUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (res.ok) {
+        metaHtml = await res.text();
+      }
+    } catch (e) {
+      // Ignore HTTP fetch errors
+    }
+
+    if (metaHtml) {
+      const metaParsed = parsePublicLinkedInHtml(metaHtml, linkedinUrl);
+      if (metaParsed) {
+        const currentJobTitle = metaParsed.jobTitle;
+        const currentCompany = metaParsed.company || identity.company.officialName || identity.company.normalized;
+        const currentHeadline = metaParsed.headline;
+
+        if (currentJobTitle || currentCompany) {
+          const currentRoleVal = [currentJobTitle || 'Executive', currentCompany ? `at ${currentCompany}` : null].filter(Boolean).join(' ');
+          
+          if (!results.roles.some(r => r.value === currentRoleVal)) {
+            results.roles.unshift({
+              value: currentRoleVal,
+              source: 'LinkedIn Meta Tags / JSON-LD',
+              sourceType: 'LinkedIn Current Work (JSON-LD & Meta Tags)',
+              confidence: CONFIDENCE.COMPANY_WEBSITE,
+              timestamp: new Date().toISOString(),
+            });
+          }
+
+          if (results.linkedinParsedData) {
+            if (currentJobTitle) results.linkedinParsedData.jobTitle = currentJobTitle;
+            if (currentCompany) results.linkedinParsedData.company = currentCompany;
+            if (currentHeadline) results.linkedinParsedData.headline = currentHeadline;
+          }
+
+          logger.success('Public Search', `LinkedIn: Extracted current work ("${currentJobTitle || 'Executive'}" at "${currentCompany}") strictly from JSON-LD & Meta Tags`);
+        }
+      }
+    }
+  } catch (metaErr) {
+    logger.warning('Public Search', `JSON-LD / Meta Tags extraction notice: ${metaErr.message}`);
+  }
+
   // ── Strategy 1 & 2: Load LinkedIn page and extract structured data (JSON-LD + meta tags) ──
   logger.running('Public Search', `LinkedIn: Loading profile ${linkedinUrl}...`);
 
@@ -522,7 +654,12 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
   if (isAuthenticated) {
     try {
       logger.running('Public Search', 'LinkedIn: Loading profile via Puppeteer with active session...');
-      await page.goto(linkedinUrl, { waitUntil: 'networkidle2', timeout: 20000 });
+      await setupPageStealth(page);
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      });
+
+      await page.goto(linkedinUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
 
       // Scroll down to trigger lazy loading of experience/education sections
       logger.running('Public Search', 'LinkedIn: Scrolling page to load experience/education sections...');
@@ -1183,6 +1320,21 @@ function extractFromText(text, source, identity, results) {
       context,
     });
   }
+
+  // Extract Indian UAN (Universal Account Number — 12-digit number starting with 10)
+  const UAN_REGEX = /\b10\d{10}\b/g;
+  const uanMatches = text.match(UAN_REGEX) || [];
+  for (const uan of uanMatches) {
+    if (results.uanNumbers && !results.uanNumbers.some(u => u.value === uan)) {
+      results.uanNumbers.push({
+        value: uan,
+        source,
+        sourceType: 'EPFO / UAN Search',
+        confidence: 0.90,
+        timestamp: new Date().toISOString()
+      });
+    }
+  }
 }
 
 function isValidEmailFormat(email) {
@@ -1202,7 +1354,7 @@ function dedup(arr, key) {
 }
 
 async function extractExperienceWithAI(identity, snippets, primaryLinkedinUrl, logger) {
-  if (snippets.length === 0) return [];
+  if (snippets.length === 0) return { experience: [], education: [] };
 
   // Pre-filter: discard signals originating from DIFFERENT LinkedIn profiles
   const filteredSnippets = snippets.filter(s => {
@@ -1218,18 +1370,21 @@ async function extractExperienceWithAI(identity, snippets, primaryLinkedinUrl, l
   });
 
   const snippetsText = filteredSnippets
-    .slice(0, 15) // Limit to top 15 snippets to keep context size clean
+    .slice(0, 18) // Top snippets to cover experience + education
     .map((r, i) => `[Signal #${i+1}]\nTitle: ${r.title}\nURL: ${r.url || r.href}\nSnippet: ${r.snippet}`)
     .join('\n\n');
 
   const linkedinRule = primaryLinkedinUrl 
-    ? `- If a snippet references a LinkedIn profile URL that is different from "${primaryLinkedinUrl}", ignore that snippet. However, if the snippet references the primary LinkedIn URL or is from other sources (e.g. news, directories) without a LinkedIn URL, do NOT ignore it.`
-    : `- If there are multiple different LinkedIn profile URLs in the snippets, verify that you only extract the career history of the target person "${identity.normalized.fullName}" who is associated with "${identity.company.normalized}". Do NOT ignore general company websites, news, or directory snippets that don't have a LinkedIn URL.`;
+    ? `- If a snippet references a LinkedIn profile URL that is different from "${primaryLinkedinUrl}", ignore that snippet.`
+    : `- Only extract information belonging to "${identity.normalized.fullName}" associated with "${identity.company.normalized}".`;
 
-  const prompt = `You are a precise professional biography and executive career history extractor.
-Given the following web search snippets about "${identity.normalized.fullName}" who works at "${identity.company.normalized}", extract their full executive career timeline (past and current job roles, company directorships, board seats, trustee positions, angel investments, and family office affiliations).
+  const prompt = `You are a precise executive biography, career timeline, and education history extractor.
+Given the following web search snippets about "${identity.normalized.fullName}" who works at "${identity.company.normalized}", extract:
+1. Their full executive career timeline (past and current job roles, corporate directorships, board seats, trustee positions, angel investments).
+2. Their educational history (universities, colleges, institutes, degrees like MBA, B.Tech, B.Com, CA, CFA, years of graduation).
 
 Target Information:
+- Target Person: ${identity.normalized.fullName}
 - Primary LinkedIn Profile URL: ${primaryLinkedinUrl || 'Not provided/discovered'}
 - Target Company: ${identity.company.normalized}
 - Company Keywords: ${identity.company.coreWords?.join(', ') || ''}
@@ -1241,18 +1396,24 @@ Generate a JSON response with exactly this structure:
 {
   "experience": [
     {
-      "title": "Executive Title/Role (e.g. Managing Director, Promoter, Board Member, Angel Investor, Trustee)",
-      "company": "Company / Entity Name (e.g. ASK Wealth Advisors, Family Office, Startup Portfolio)",
-      "duration": "Duration/Years if mentioned (e.g. 2022 - Present, or 3 years, or 'Present'), otherwise null"
+      "title": "Role / Designation (e.g. Senior Vice President, AVP, Director, Promoter)",
+      "company": "Company / Organization Name (e.g. ASK Wealth Advisors, Kotak Mahindra Bank, ICICI)",
+      "duration": "Duration/Years if mentioned (e.g. 2021 - Present, 2017 - 2021), otherwise null"
+    }
+  ],
+  "education": [
+    {
+      "institution": "University / College / Institute (e.g. IIM Ahmedabad, Mumbai University, Narsee Monjee)",
+      "degree": "Degree / Qualification (e.g. MBA, Master of Business Administration, B.Com, CFA)",
+      "fieldOfStudy": "Major / Discipline if mentioned",
+      "duration": "Years/Duration if mentioned (e.g. 2010 - 2012), otherwise null"
     }
   ]
 }
 
 Rules:
-- Only include roles belonging to the target person "${identity.normalized.fullName}". Do not include roles of other individuals with different names.
-- Include corporate directorships, board seats, angel investments, and trustee positions in addition to standard employment roles.
+- Only include records belonging to "${identity.normalized.fullName}". Do not include roles/education of different people.
 ${linkedinRule}
-- Verify that at least one current or past role links to "${identity.company.normalized}" or its core words/aliases. If a snippet is about an entirely different person (e.g. different industry/location/company with no links to the target company), ignore it.
 - Return ONLY the JSON object, no markdown or extra text.`;
 
   // Try Groq first, Gemini second
@@ -1269,11 +1430,14 @@ ${linkedinRule}
         logger
       );
       const content = JSON.parse(text);
-      if (content && Array.isArray(content.experience)) {
-        return content.experience;
+      if (content) {
+        return {
+          experience: Array.isArray(content.experience) ? content.experience : [],
+          education: Array.isArray(content.education) ? content.education : [],
+        };
       }
     } catch (e) {
-      logger.warning('Public Search', `AI experience extraction (Groq) failed: ${e.message}. Trying Gemini fallback...`);
+      logger.warning('Public Search', `AI career & education extraction (Groq) failed: ${e.message}. Trying Gemini fallback...`);
     }
   }
 
@@ -1288,9 +1452,6 @@ ${linkedinRule}
       const match = text.match(/\{[\s\S]*\}/);
       if (match) {
         const content = JSON.parse(match[0]);
-        if (content && Array.isArray(content.experience)) {
-          return content.experience;
-        }
       }
     } catch (e) {
       logger.warning('Public Search', `AI experience extraction fallback (Gemini) failed: ${e.message}`);
@@ -1558,6 +1719,7 @@ async function discoverLinkedInProfileUrl(page, identity, results, allSnippets, 
         if (isMatch) {
           logger.success('Public Search', `LinkedIn: Discovered profile URL from web search snippets — ${norm}`);
           results.socialLinks.push({ platform: 'LinkedIn', url: norm, source: 'Web Search Snippet' });
+          populateLinkedinParsedDataFromSerp(snip.title, snip.snippet, norm, results);
           return norm;
         }
       }
@@ -1749,11 +1911,40 @@ async function discoverLinkedInProfileUrl(page, identity, results, allSnippets, 
       if (!results.socialLinks.some(s => s.url === normalized)) {
         results.socialLinks.push({ platform: 'LinkedIn', url: normalized, source: 'Search Engine (Verified)' });
       }
+
+      // Immediately populate linkedinParsedData from discovered SERP title and snippet
+      populateLinkedinParsedDataFromSerp(cand.title, cand.snippet, normalized, results);
+
       return normalized;
     }
   }
 
   return null;
+}
+
+function populateLinkedinParsedDataFromSerp(title, snippet, url, results) {
+  if (!title) return;
+  const virtualHtml = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>${title}</title>
+      <meta property="og:title" content="${title}" />
+      <meta property="og:description" content="${snippet || ''}" />
+      <meta property="og:url" content="${url}" />
+    </head>
+    <body>
+      <h1>${title}</h1>
+      <p>${snippet || ''}</p>
+    </body>
+    </html>
+  `;
+  const initialParsed = parsePublicLinkedInHtml(virtualHtml, url);
+  if (initialParsed && (initialParsed.name || initialParsed.headline || initialParsed.jobTitle)) {
+    if (!results.linkedinParsedData || (initialParsed.confidence >= (results.linkedinParsedData?.confidence || 0))) {
+      results.linkedinParsedData = initialParsed;
+    }
+  }
 }
 
 function normalizeLinkedInUrl(url) {
@@ -1798,7 +1989,8 @@ async function discoverOfficialDomain(page, identity, logger) {
               'twitter.com', 'x.com', 'instagram.com', 'youtube.com', 'wikipedia.org', 
               'justdial.com', 'indiamart.com', 'ambitionbox.com', 'glassdoor.com', 'sulekha.com',
               'crunchbase.com', 'tracxn.com', 'signalhire.com', 'apollo.io', 'hunter.io', 
-              'rocketreach.co', 'peopledatalabs.com', 'instagram.com', 'pinterest.com'
+              'rocketreach.co', 'peopledatalabs.com', 'pinterest.com', 'ramseysolutions.com',
+              'google.com', 'play.google.com', 'chatgpt.com', 'terrellowens.com'
             ];
             const isDirectory = directories.some(d => host === d || host.endsWith('.' + d));
             if (!isDirectory) {
