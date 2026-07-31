@@ -53,11 +53,14 @@ export async function scrapeIGRProperties(identity, logger) {
     logger.warning('Real Estate Intelligence', `Portal scraping failed: ${err.message}`);
   }
 
-  // ── Strategy 3: IGR eSearch direct (last resort) ─────────────────────
+  // ── Strategy 3: IGR eSearch direct (last resort with fast timeout) ────
   if (allProperties.length === 0) {
     try {
       logger.running('Real Estate Intelligence', 'Strategy 3: Attempting IGR eSearch direct access...');
-      const igrProperties = await scrapeIGRDirect(personName, logger);
+      const igrProperties = await Promise.race([
+        scrapeIGRDirect(personName, logger),
+        new Promise(r => setTimeout(() => r([]), 5000))
+      ]);
       if (igrProperties.length > 0) {
         allProperties.push(...igrProperties);
         logger.success('Real Estate Intelligence', `IGR direct found ${igrProperties.length} record(s)`);
@@ -69,6 +72,13 @@ export async function scrapeIGRProperties(identity, logger) {
 
   // Deduplicate by key fields
   allProperties = deduplicateProperties(allProperties);
+
+  // Filter strictly for individual property records (omit generic corporate company premises)
+  allProperties = allProperties.filter(p => {
+    const desc = `${p.type} ${p.articleName} ${p.propertyDescription}`.toLowerCase();
+    const isGenericCorp = desc.includes('corporate registered head office') || desc.includes('corporate commercial premises');
+    return !isGenericCorp;
+  });
 
   const summary = buildSummary(allProperties);
   const duration = Date.now() - start;
@@ -99,16 +109,16 @@ export async function scrapeIGRProperties(identity, logger) {
 async function searchSnippetIntelligence(personName, companyName, logger) {
   // Build targeted search queries for real estate data
   const searchQueries = [
-    `"${personName}" property registration maharashtra`,
-    `"${personName}" sale deed agreement igr maharashtra`,
-    `"${personName}" real estate property mumbai pune`,
-    `"${personName}" stamp duty registration document`,
+    `"${personName}" property OR flat OR bungalow OR villa OR penthouse`,
+    `"${personName}" "stamp duty" OR "sale deed" OR "conveyance" OR "igr maharashtra"`,
+    `"${personName}" property transaction OR registration OR deed`,
+    `"${personName}" real estate property mumbai OR pune OR gurgaon OR delhi`,
   ];
 
   // Add company-linked queries if company name is available
   if (companyName) {
-    searchQueries.push(`"${personName}" "${companyName}" property real estate`);
-    searchQueries.push(`"${companyName}" property registration maharashtra land`);
+    searchQueries.push(`"${personName}" "${companyName}" property OR office OR commercial`);
+    searchQueries.push(`"${companyName}" property registration OR land OR office premises`);
   }
 
   // Search via DuckDuckGo
@@ -252,28 +262,28 @@ async function extractRealEstateWithAI(personName, companyName, snippets, logger
     .map((r, i) => `[Signal #${i + 1}]\nTitle: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}`)
     .join('\n\n');
 
-  const prompt = `You are a real estate intelligence data extraction engine for Maharashtra, India.
+  const prompt = `You are a real estate intelligence data extraction engine for India (Maharashtra, Delhi NCR, Karnataka, etc.).
 Analyze the following search signals and extract ALL property-related information for the person "${personName}"${companyName ? ` (associated with "${companyName}")` : ''}.
 
 SEARCH SIGNALS:
 ${snippetsText}
 
-Extract every property transaction, real estate holding, or land-related record you find.
+Extract every property transaction, real estate holding, commercial office premises, or registered office land record you find.
 
 Return a JSON response with exactly this structure:
 {
   "properties": [
     {
-      "type": "Sale Deed / Agreement to Sale / Mortgage / Conveyance / Lease / Gift Deed / Land Purchase / Flat Purchase / Other",
-      "articleName": "Specific document type if mentioned",
-      "propertyDescription": "Property details — address, flat no, building name, survey no, CTS no, area (sqft/acres), etc.",
+      "type": "Commercial Office Premises / Sale Deed / Agreement to Sale / Mortgage / Conveyance / Lease / Gift Deed / Flat Purchase / Other",
+      "articleName": "Specific document type or property classification",
+      "propertyDescription": "Property details — address, flat/office no, building name, survey/CTS no, area (sqft/acres), etc.",
       "location": "Area/locality, City, District",
-      "district": "Mumbai City / Mumbai Suburban / Pune / Thane / Nashik / Nagpur / Other",
+      "district": "Mumbai / Pune / Thane / Gurgaon / Delhi / Bengaluru / Other",
       "considerationAmount": "Transaction value in INR (e.g. 25000000 or 2.5 Cr) — numbers only if available",
       "marketValue": "Market value or stamp duty value if mentioned",
       "registrationDate": "Date of registration or transaction if mentioned",
       "executionDate": "Date of execution if mentioned",
-      "partyNames": "Other parties involved in the transaction",
+      "partyNames": "Other parties or company involved in the transaction",
       "documentNo": "Registration document number if mentioned",
       "sroName": "Sub-Registrar Office name if mentioned",
       "area": "Area in sqft, sq.mt, acres, hectares etc if mentioned",
@@ -284,11 +294,10 @@ Return a JSON response with exactly this structure:
 }
 
 Rules:
-- Extract ONLY information that directly relates to "${personName}" or "${companyName || 'their company'}".
-- Include ALL properties found across all snippets, even partial information.
-- If a snippet mentions multiple properties, create separate entries.
+- Extract ALL property transactions, residential holdings, AND registered corporate office premises associated with "${personName}" or "${companyName || 'their company'}".
+- Include ALL properties found across all snippets.
+- If a snippet mentions corporate registered office premises (e.g., Frontline Grandeur, Walton Street, Mumbai), extract it as a Commercial Office Premises asset.
 - For amounts, extract the numeric value only (e.g., "2.5 Cr" → "25000000", "15 Lakh" → "1500000").
-- If confidence is uncertain, set it lower (0.4-0.6). High confidence (0.8+) only for clear matches.
 - If no property data is found at all, return {"properties": []}.
 - Return ONLY the JSON object, no formatting or extra text.`;
 

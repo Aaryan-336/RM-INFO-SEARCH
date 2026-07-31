@@ -38,9 +38,18 @@ app.get('*', (req, res) => {
   res.sendFile(join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`\n  RM Intelligence Platform`);
   console.log(`  ─────────────────────────`);
   console.log(`  Local:   http://localhost:${PORT}`);
   console.log(`  Status:  Ready\n`);
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n[PORT BUSY] Port ${PORT} is already in use by another process.`);
+    console.error(`Try running: lsof -ti:${PORT} | xargs kill -9\n`);
+  } else {
+    console.error(`[SERVER ERROR] ${err.message}`);
+  }
 });

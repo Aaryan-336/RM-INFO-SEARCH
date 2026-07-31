@@ -3,6 +3,7 @@
 
 import Tesseract from 'tesseract.js';
 import { CONFIDENCE } from '../utils/confidence.js';
+import { extractExecutiveMobilesFromText } from './mobileExtractor.js';
 
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 const PHONE_REGEX = /(?:\+91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}/g;
@@ -93,21 +94,19 @@ function extractContactsFromText(text, source, confidence, identity, results) {
     }
   }
 
-  // Extract phones
-  const phones = text.match(PHONE_REGEX) || [];
-  for (const phone of phones) {
-    const cleaned = phone.replace(/[\s-()]/g, '');
-    if (cleaned.length >= 10 && cleaned.length <= 15) {
-      results.contacts.push({
-        type: 'phone',
-        value: cleaned,
-        source,
-        sourceType: 'OCR — Public Document',
-        confidence: personMentioned ? confidence : confidence * 0.8,
-        timestamp: new Date().toISOString(),
-        personMentioned,
-      });
-    }
+  // Extract executive mobile numbers using high-precision validator & proximity engine
+  const extractedMobiles = extractExecutiveMobilesFromText(text, identity, `OCR — ${source}`, confidence);
+  for (const mob of extractedMobiles) {
+    results.contacts.push({
+      type: 'phone',
+      value: mob.value,
+      source: mob.source,
+      sourceType: mob.sourceType,
+      confidence: mob.confidence,
+      attribution: mob.attribution,
+      timestamp: mob.timestamp,
+      personMentioned: mob.personMentioned,
+    });
   }
 
   // Extract named entities (roles, designations)

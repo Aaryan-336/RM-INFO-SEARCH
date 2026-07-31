@@ -122,7 +122,8 @@ router.get('/health', (req, res) => {
   const keys = {
     groq: !!process.env.GROQ_API_KEY,
     gemini: !!process.env.GEMINI_API_KEY,
-    brightdata: !!process.env.BRIGHTDATA_API_KEY,
+    apify: !!process.env.APIFY_API_TOKEN,
+    lusha: !!(process.env.LUSHA_API_KEY || process.env.Lusha_API),
     apollo: !!process.env.APOLLO_API_KEY,
     hunter: !!process.env.HUNTER_API_KEY,
     rocketreach: !!process.env.ROCKETREACH_API_KEY,

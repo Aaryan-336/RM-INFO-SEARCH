@@ -40,14 +40,8 @@ export async function scrapeLinkedInProfileWithApify(linkedinUrl, logger, target
   // Apify REST API endpoints use tilde (~) in place of slash (/) for actor names
   const formattedActorId = rawActorId.replace('/', '~');
 
-  const enableEmailSearch = process.env.ENABLE_APIFY_EMAIL_SEARCH === 'true' || process.env.ENABLE_APIFY_EMAIL_SEARCH === '1';
-  const mode = enableEmailSearch
-    ? 'Profile details with email search ($10 per 1k)'
-    : 'Profile details no email ($4 per 1k)';
-
   const endpointUrl = `https://api.apify.com/v2/acts/${formattedActorId}/run-sync-get-dataset-items?token=${apiToken}&timeout=60`;
   const payload = {
-    profileScraperMode: mode,
     urls: [linkedinUrl],
   };
 
@@ -74,6 +68,12 @@ export async function scrapeLinkedInProfileWithApify(linkedinUrl, logger, target
     }
 
     const rawRecord = items[0];
+    if (!rawRecord || rawRecord.error || rawRecord.message) {
+      const errMsg = rawRecord?.error || rawRecord?.message || 'Empty or error dataset';
+      logger?.warning('Public Search', `Apify notice: ${errMsg}`);
+      return null;
+    }
+
     const normalized = normalizeApifyLinkedInRecord(rawRecord, linkedinUrl, targetName);
 
     if (normalized) {
@@ -127,14 +127,14 @@ function normalizeApifyLinkedInRecord(record, linkedinUrl, targetName = null) {
   // Total Experience Years / First Role Year
   const totalExpYearsNum = record.totalExperienceYears || (record.firstRoleYear ? (new Date().getFullYear() - record.firstRoleYear) : null);
 
-  // Mapped experience array (supporting `experiences` or `experience`)
+  // Mapped experience array (supporting all Apify actor field variants)
   const experience = [];
-  const rawExperience = record.experiences || record.experience || record.positions || [];
+  const rawExperience = record.experiences || record.experience || record.positions || record.employmentHistory || record.workExperience || record.history || [];
   if (Array.isArray(rawExperience)) {
     for (const exp of rawExperience) {
       if (!exp) continue;
       const expCompany = exp.companyName || (typeof exp.company === 'string' ? exp.company : (exp.company?.name || ''));
-      const expTitle = exp.title || exp.position || exp.job_title || 'Position';
+      const expTitle = exp.title || exp.position || exp.job_title || exp.role || 'Position';
       const startDate = exp.jobStartedOn || exp.startDate || exp.start_date || '';
       const endDate = exp.jobStillWorking ? 'Present' : (exp.jobEndedOn || exp.endDate || exp.end_date || 'Present');
       let duration = exp.duration || (startDate || endDate ? [startDate, endDate].filter(Boolean).join(' - ') : 'N/A');
@@ -156,7 +156,7 @@ function normalizeApifyLinkedInRecord(record, linkedinUrl, targetName = null) {
   }
 
   // Fallback: If no experience timeline items returned, construct current role
-  if (experience.length === 0 && (jobTitle || company)) {
+  if (experience.length === 0 && (jobTitle || company || finalHeadline)) {
     experience.push({
       title: jobTitle || 'Executive',
       company: company || '',
@@ -168,13 +168,13 @@ function normalizeApifyLinkedInRecord(record, linkedinUrl, targetName = null) {
     });
   }
 
-  // Mapped education array (supporting `educations` with `title` & `subtitle`)
+  // Mapped education array (supporting all Apify actor field variants)
   const education = [];
-  const rawEducation = record.educations || record.education || [];
+  const rawEducation = record.educations || record.education || record.schools || record.academicHistory || record.studies || [];
   if (Array.isArray(rawEducation)) {
     for (const edu of rawEducation) {
       if (!edu) continue;
-      let rawTitle = edu.title || edu.schoolName || edu.school || edu.institution || '';
+      let rawTitle = edu.title || edu.schoolName || edu.school || edu.institution || edu.school_name || '';
       let subtitle = edu.subtitle || edu.degree || edu.degree_name || '';
       let fieldStudy = edu.fieldOfStudy || edu.field_of_study || '';
 

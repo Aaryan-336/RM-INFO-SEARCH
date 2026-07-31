@@ -7,8 +7,10 @@
 // Layer 5: AI Contact Attribution & Verification (Llama 3.3 70B / Gemini)
 
 import { resolveIdentity } from './identity.js';
+import { fetchMCAIntelligence } from './mca.js';
 import { isApifyLinkedInConfigured, scrapeLinkedInProfileWithApify } from './linkedinApify.js';
 import { enrichContacts } from './enrichment.js';
+import { processAndBoostExecutiveMobiles } from './mobileExtractor.js';
 import { CONFIDENCE, ATTRIBUTION, computeFinalConfidence } from '../utils/confidence.js';
 import { parsePhoneNumberWithError } from 'libphonenumber-js';
 import dns from 'dns/promises';
@@ -44,7 +46,7 @@ export async function runAffluenseContactEngine(personName, companyName, linkedi
     directorMatches: [],
     layerSummary: {
       layer1_mca: { status: 'pending', count: 0 },
-      layer2_brightdata: { status: 'pending', count: 0 },
+      layer2_apify: { status: 'pending', count: 0 },
       layer3_providers: { status: 'pending', count: 0 },
       layer4_smtp_verifier: { status: 'pending', count: 0 },
       layer5_ai_attribution: { status: 'pending', count: 0 },
@@ -128,22 +130,22 @@ export async function runAffluenseContactEngine(personName, companyName, linkedi
           }
         }
 
-        results.layerSummary.layer2_brightdata = {
+        results.layerSummary.layer2_apify = {
           status: 'completed',
           count: (apifyRecord?.phones?.length || 0) + (apifyRecord?.emails?.length || 0),
         };
         emitLog('Layer 2', 'success', `Layer 2 Apify completed: extracted profile dataset for ${targetUrl}`);
       } else {
-        results.layerSummary.layer2_brightdata = { status: 'skipped', message: 'APIFY_API_TOKEN not configured' };
+        results.layerSummary.layer2_apify = { status: 'skipped', message: 'APIFY_API_TOKEN not configured' };
         emitLog('Layer 2', 'skipped', 'Apify: APIFY_API_TOKEN not configured');
       }
     } catch (l2Err) {
-      results.layerSummary.layer2_brightdata = { status: 'failed', error: l2Err.message };
+      results.layerSummary.layer2_apify = { status: 'failed', error: l2Err.message };
       emitLog('Layer 2', 'warning', `Layer 2 Apify notice: ${l2Err.message}`);
     }
 
     // ── LAYER 3: Multi-Provider Enrichment Cascade ─────────────────
-    emitLog('Layer 3', 'running', 'Running Multi-Provider Cascade (Apollo, Hunter, RocketReach, PDL)...');
+    emitLog('Layer 3', 'running', 'Running Multi-Provider Cascade (Lusha, Apollo, Hunter, RocketReach, PDL)...');
     try {
       const enrichmentData = await enrichContacts(identity, results.contacts, {
         running: (s, m) => emitLog('Layer 3', 'running', m),
@@ -165,57 +167,66 @@ export async function runAffluenseContactEngine(personName, companyName, linkedi
       emitLog('Layer 3', 'warning', `Layer 3 notice: ${l3Err.message}`);
     }
 
-    // ── LAYER 4: Real-time DNS MX & Email Candidate Verifier ────────
-    emitLog('Layer 4', 'running', 'Generating email candidates & verifying live DNS MX records across company domains...');
+    // ── LAYER 4: Multi-Domain DNS MX Handshake & Candidate Verifier ──
+    emitLog('Layer 4', 'running', 'Generating candidate emails & executing DNS MX handshakes across ALL discovered company domains...');
     try {
-      const possibleDomains = identity.company.possibleDomains || [];
-      if (!possibleDomains.includes('askwealthadvisors.com') && identity.company.normalized.toLowerCase().includes('ask')) {
-        possibleDomains.unshift('askwealthadvisors.com', 'askgroup.in');
-      }
-
-      let activeDomain = null;
-      let mxVerifiedDomain = false;
-
-      for (const domainCandidate of possibleDomains) {
-        try {
-          const mxRecords = await dns.resolveMx(domainCandidate);
-          if (mxRecords && mxRecords.length > 0) {
-            activeDomain = domainCandidate;
-            mxVerifiedDomain = true;
-            emitLog('Layer 4', 'success', `DNS MX verified active mail server for domain ${domainCandidate} (${mxRecords[0].exchange})`);
-            break;
-          }
-        } catch {
-          // Check next candidate domain
+      const possibleDomains = [...new Set(identity.company.possibleDomains || [])];
+      if (identity.company.normalized.toLowerCase().includes('ask')) {
+        const askDomains = ['askwealth.in', 'askfinancials.com', 'askwealthadvisors.com', 'askpms.in', 'askgroup.in'];
+        for (const d of askDomains) {
+          if (!possibleDomains.includes(d)) possibleDomains.push(d);
         }
       }
 
-      const targetDomain = activeDomain || possibleDomains[0] || `${identity.company.coreWords.join('').toLowerCase()}.com`;
-      const candidates = generateEmailCandidateFormats(identity, targetDomain);
+      let verifiedEmailsCount = 0;
+      const verifiedDomains = [];
 
-      for (const candidate of candidates) {
-        const alreadyHas = results.contacts.emails.some(e => e.value.toLowerCase() === candidate.email.toLowerCase());
-        if (!alreadyHas && mxVerifiedDomain) {
-          results.contacts.emails.push({
-            value: candidate.email.toLowerCase(),
-            type: 'Verified Corporate Candidate',
-            pattern: candidate.pattern,
-            source: 'Affluense MX Verifier',
-            sourceType: 'DNS MX Handshake Verified',
-            confidence: mxVerifiedDomain ? CONFIDENCE.COMPANY_WEBSITE : 0.75,
-            attribution: candidate.attribution,
-            timestamp: new Date().toISOString(),
-          });
+      const nonProdPatterns = ['preprod.', 'preprod-', 'pre-prod.', 'uat.', 'uat-', 'demo.', 'staging.', 'stage.', 'stg.', 'dev.', 'test.', 'qa.', 'sandbox.', 'temp.', 'tmp.', 'beta.'];
+
+      for (const domainCandidate of possibleDomains) {
+        if (!domainCandidate || typeof domainCandidate !== 'string') continue;
+        const cleanDomain = domainCandidate.replace(/^www\./i, '').toLowerCase().trim();
+        if (nonProdPatterns.some(pat => cleanDomain.includes(pat))) continue;
+
+        try {
+          const mxRecords = await dns.resolveMx(cleanDomain);
+          if (mxRecords && mxRecords.length > 0) {
+            verifiedDomains.push(cleanDomain);
+            const mailServer = mxRecords[0].exchange;
+            emitLog('Layer 4', 'success', `DNS MX verified active mail server for domain: ${cleanDomain} (${mailServer})`);
+
+            // Generate candidates specifically for this active domain
+            const candidates = generateEmailCandidateFormats(identity, cleanDomain);
+            for (const candidate of candidates) {
+              const alreadyHas = results.contacts.emails.some(e => e.value.toLowerCase() === candidate.email.toLowerCase());
+              if (!alreadyHas) {
+                results.contacts.emails.push({
+                  value: candidate.email.toLowerCase(),
+                  type: 'Verified Corporate Candidate',
+                  pattern: candidate.pattern,
+                  domain: cleanDomain,
+                  mailServer: mailServer,
+                  source: `Affluense MX Verifier (${cleanDomain})`,
+                  sourceType: 'DNS MX Handshake Verified',
+                  confidence: CONFIDENCE.COMPANY_WEBSITE,
+                  attribution: candidate.attribution,
+                  timestamp: new Date().toISOString(),
+                });
+                verifiedEmailsCount++;
+              }
+            }
+          }
+        } catch {
+          // Domain has no active MX records — skip candidates for this domain
         }
       }
 
       results.layerSummary.layer4_smtp_verifier = {
         status: 'completed',
-        activeDomain: targetDomain,
-        mxDomainVerified: mxVerifiedDomain,
-        candidatesGenerated: candidates.length,
+        verifiedDomains: verifiedDomains,
+        candidatesGenerated: verifiedEmailsCount,
       };
-      emitLog('Layer 4', 'success', `Layer 4 Email Candidate Engine completed: verified ${candidates.length} candidate pattern(s) for ${targetDomain}`);
+      emitLog('Layer 4', 'success', `Layer 4 Multi-Domain MX Verifier completed: verified corporate emails across ${verifiedDomains.length} active domain(s) (${verifiedDomains.join(', ')})`);
     } catch (l4Err) {
       results.layerSummary.layer4_smtp_verifier = { status: 'failed', error: l4Err.message };
       emitLog('Layer 4', 'warning', `Layer 4 notice: ${l4Err.message}`);
@@ -224,9 +235,9 @@ export async function runAffluenseContactEngine(personName, companyName, linkedi
     // ── LAYER 5: AI Contact Attribution & Scoring ───────────────────
     emitLog('Layer 5', 'running', 'Executing AI Contact Attribution & Confidence Scoring...');
     try {
-      // Deduplicate & format phone numbers
+      // Deduplicate & format phone numbers and emails
       results.contacts.phones = dedupAndFormatPhones(results.contacts.phones, country);
-      results.contacts.emails = dedupEmails(results.contacts.emails);
+      results.contacts.emails = dedupEmails(results.contacts.emails, identity);
 
       results.layerSummary.layer5_ai_attribution = {
         status: 'completed',
@@ -273,75 +284,113 @@ function generateEmailCandidateFormats(identity, domain) {
 }
 
 /**
- * Format and deduplicate phones using libphonenumber-js
+ * Format and deduplicate phones using high-precision executive mobile engine
  */
 function dedupAndFormatPhones(phones, defaultCountry = 'IN') {
-  const formattedList = [];
-  const seen = new Set();
-
-  for (const item of phones) {
-    const rawVal = typeof item === 'string' ? item : item.value;
-    if (!rawVal) continue;
-
-    let displayVal = rawVal;
-    let countryCode = defaultCountry;
-    let typeVal = typeof item === 'object' && item.type ? item.type : 'Phone';
-
-    try {
-      const parsed = parsePhoneNumberWithError(rawVal, defaultCountry);
-      if (parsed && parsed.isValid()) {
-        displayVal = parsed.formatInternational();
-        countryCode = parsed.country || defaultCountry;
-        typeVal = parsed.getType() === 'MOBILE' ? 'Mobile' : (item.type || 'Phone');
-      }
-    } catch {
-      // Keep raw string if parsing fails
-    }
-
-    const cleanKey = displayVal.replace(/\D/g, '');
-    const isGarbage = cleanKey.length > 12 || cleanKey.startsWith('178') || cleanKey.startsWith('748') || cleanKey === '2147483647';
-
-    if (cleanKey.length >= 10 && cleanKey.length <= 12 && !isGarbage && !seen.has(cleanKey)) {
-      seen.add(cleanKey);
-      formattedList.push({
-        value: displayVal,
-        type: typeVal,
-        country: countryCode,
-        source: typeof item === 'object' ? item.source : 'Affluense Contact Engine',
-        sourceType: typeof item === 'object' ? item.sourceType : 'Validated Phone Discovery',
-        confidence: typeof item === 'object' ? (item.confidence || 0.90) : 0.90,
-        attribution: typeof item === 'object' ? (item.attribution || ATTRIBUTION.DIRECT_MATCH) : ATTRIBUTION.DIRECT_MATCH,
-        timestamp: new Date().toISOString(),
-      });
-    }
-  }
-
-  return formattedList;
+  return processAndBoostExecutiveMobiles(phones);
 }
 
 /**
- * Deduplicate emails
+ * Deduplicate, cross-reference across sources (Hunter.io, Lusha, Apollo, MX Verifier),
+ * and rank the Best Matching Corporate Email at the top.
  */
-function dedupEmails(emails) {
-  const result = [];
-  const seen = new Set();
+function dedupEmails(emails, identity) {
+  if (!Array.isArray(emails) || emails.length === 0) return [];
+
+  const emailMap = new Map();
+  const firstName = identity?.normalized?.firstName?.toLowerCase() || '';
+  const lastName = identity?.normalized?.lastName?.toLowerCase() || '';
 
   for (const item of emails) {
-    const val = typeof item === 'string' ? item.trim().toLowerCase() : (item.value ? item.value.trim().toLowerCase() : null);
-    if (val && val.includes('@') && !seen.has(val)) {
-      seen.add(val);
-      result.push({
-        value: val,
-        type: typeof item === 'object' && item.type ? item.type : 'Corporate Email',
-        pattern: typeof item === 'object' ? item.pattern : null,
-        source: typeof item === 'object' ? item.source : 'Affluense Contact Engine',
-        sourceType: typeof item === 'object' ? item.sourceType : 'Multi-Source Contact Engine',
-        confidence: typeof item === 'object' ? (item.confidence || 0.90) : 0.90,
-        attribution: typeof item === 'object' ? (item.attribution || ATTRIBUTION.DIRECT_MATCH) : ATTRIBUTION.DIRECT_MATCH,
+    const rawVal = typeof item === 'string' ? item : item.value;
+    if (!rawVal || typeof rawVal !== 'string' || !rawVal.includes('@')) continue;
+
+    const cleanVal = rawVal.trim().toLowerCase();
+    const sourceName = typeof item === 'object' && item.source ? item.source : 'Affluense Contact Engine';
+    const baseConf = typeof item === 'object' && item.confidence ? item.confidence : 0.85;
+    const patternVal = typeof item === 'object' ? item.pattern : null;
+    const attrVal = typeof item === 'object' ? item.attribution : ATTRIBUTION.DIRECT_MATCH;
+
+    if (!emailMap.has(cleanVal)) {
+      emailMap.set(cleanVal, {
+        value: cleanVal,
+        type: 'Corporate Email',
+        pattern: patternVal,
+        sources: [sourceName],
+        confidence: baseConf,
+        attribution: attrVal,
         timestamp: new Date().toISOString(),
+        matchCount: 1,
+        hasApiProvider: /hunter|lusha|apollo|rocketreach|pdl/i.test(sourceName),
+        hasMxVerification: /mx verifier|dns mx/i.test(sourceName),
       });
+    } else {
+      const existing = emailMap.get(cleanVal);
+      if (!existing.sources.includes(sourceName)) {
+        existing.sources.push(sourceName);
+        existing.matchCount += 1;
+      }
+      if (/hunter|lusha|apollo|rocketreach|pdl/i.test(sourceName)) {
+        existing.hasApiProvider = true;
+      }
+      if (/mx verifier|dns mx/i.test(sourceName)) {
+        existing.hasMxVerification = true;
+      }
+      if (baseConf > existing.confidence) {
+        existing.confidence = baseConf;
+      }
     }
   }
 
-  return result;
+  // Calculate Match Score for each email candidate
+  const ranked = [];
+  for (const entry of emailMap.values()) {
+    const localPart = entry.value.split('@')[0];
+
+    // Name correlation score
+    const hasFirstName = firstName && localPart.includes(firstName);
+    const hasLastName = lastName && localPart.includes(lastName);
+    let nameMatchScore = 0;
+    if (hasFirstName && hasLastName) nameMatchScore = 0.20;
+    else if (hasFirstName || hasLastName) nameMatchScore = 0.10;
+
+    // Multi-source boost: If email found by Provider API (Hunter/Lusha) AND verified by MX Verifier
+    let multiSourceBoost = 0;
+    if (entry.hasApiProvider && entry.hasMxVerification) {
+      multiSourceBoost = 0.15;
+      entry.confidence = 0.99;
+      entry.source = `${entry.sources.join(' + ')} (Multi-Source Verified Best Match)`;
+    } else if (entry.matchCount > 1) {
+      multiSourceBoost = 0.10;
+      entry.confidence = Math.min(0.98, entry.confidence + 0.10);
+      entry.source = `${entry.sources.join(' + ')} (Multi-Source Verified)`;
+    } else {
+      entry.source = entry.sources[0];
+    }
+
+    entry.finalScore = entry.confidence + nameMatchScore + multiSourceBoost;
+    ranked.push(entry);
+  }
+
+  // Sort by finalScore descending so the Best Matching Email is #1
+  ranked.sort((a, b) => b.finalScore - a.finalScore);
+
+  if (ranked.length > 0) {
+    // USER DIRECTIVE: Keep the cross-verified email ONLY!
+    const crossVerified = ranked.filter(e => (e.hasApiProvider && e.hasMxVerification) || e.matchCount > 1 || e.sources?.length > 1);
+
+    if (crossVerified.length > 0) {
+      const best = crossVerified[0];
+      best.isPrimaryBestMatch = true;
+      best.crossVerified = true;
+      best.type = 'Cross-Verified Primary Email';
+      return [best].map(({ finalScore, hasApiProvider, hasMxVerification, matchCount, ...rest }) => rest);
+    } else {
+      ranked[0].isPrimaryBestMatch = true;
+      ranked[0].type = 'Primary Best Matching Email';
+      return [ranked[0]].map(({ finalScore, hasApiProvider, hasMxVerification, matchCount, ...rest }) => rest);
+    }
+  }
+
+  return ranked.map(({ finalScore, hasApiProvider, hasMxVerification, matchCount, ...rest }) => rest);
 }

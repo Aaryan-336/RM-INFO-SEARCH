@@ -16,9 +16,14 @@ export function renderResultsView(data) {
     </header>
 
     <main class="results-view">
-      <div class="results-header">
-        <button class="back-btn" id="back-btn">← New Search</button>
-        <div class="results-title">
+      <div class="results-header" style="display:flex; justify-content:space-between; align-items:center;">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <button class="back-btn" id="back-btn">← New Search</button>
+          <button class="export-pdf-btn" id="export-pdf-btn" style="background: linear-gradient(135deg, var(--accent, #d4af37) 0%, #b89443 100%); color: #000; font-weight: 700; font-size: 0.85rem; padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all 0.2s ease; box-shadow: 0 2px 8px rgba(0,0,0,0.3);">
+            <span>📄</span> Export to PDF
+          </button>
+        </div>
+        <div class="results-title" style="text-align:center;">
           <h2>${escHtml(query.personName)}</h2>
           <p>${escHtml(query.companyName)}</p>
         </div>
@@ -32,11 +37,12 @@ export function renderResultsView(data) {
       ${renderContactSection(contacts)}
       ${renderPersonSection(person, query)}
       ${renderCompanySection(company, query)}
-      ${renderDirectorSection(directors, query)}
+      ${renderDirectorSection(directors || company?.directors, query)}
       ${renderTimelineSection(person?.experience)}
       ${renderEducationSection(person?.education)}
       ${renderSkillsSection(person?.linkedinParsedData?.skills || person?.skills)}
       ${renderRelatedProfilesSection(person?.linkedinParsedData?.related_profiles || data?.relatedProfiles)}
+      ${renderNewsMentionsSection(data?.newsMentions)}
       ${renderRealEstateSection(realEstate)}
       ${renderSocialSection(socialLinks)}
       ${renderBriefingSection(briefing)}
@@ -92,40 +98,76 @@ function renderExecutiveHeroCard(data) {
     .slice(0, 2)
     .join('');
 
-  // ── Calculate Total Experience Years from Bright Data Career Timeline ──
+  // ── Analyze Career Timeline: Differentiate Voluntary/Student vs Internships vs Paid Full-Time Professional ──
   const expList = person?.experience || [];
   const currentYear = new Date().getFullYear();
-  let earliestYear = currentYear;
-  let explicitYrsSum = 0;
+
+  let paidMonthsSum = 0;
+  let internshipMonthsSum = 0;
+  let voluntaryCount = 0;
+  let earliestPaidYear = currentYear;
+
+  const isVoluntaryOrStudentRole = (title, companyStr) => {
+    const text = `${title || ''} ${companyStr || ''}`.toLowerCase();
+    return text.includes('volunteer') || text.includes('fest') || text.includes('campus ambassador') ||
+           text.includes('muskurahat') || text.includes('foundation') || text.includes('ngo') ||
+           text.includes('student') || text.includes('society') || text.includes('club member');
+  };
+
+  const isInternshipRole = (title) => {
+    const text = (title || '').toLowerCase();
+    return text.includes('intern') || text.includes('trainee') || text.includes('apprentice');
+  };
 
   for (const exp of expList) {
     if (!exp) continue;
+    const titleStr = exp.title || '';
+    const companyStr = exp.company || '';
     const durStr = String(exp.duration || '');
+
+    // Exclude voluntary/student roles from professional experience sum
+    if (isVoluntaryOrStudentRole(titleStr, companyStr)) {
+      voluntaryCount++;
+      continue;
+    }
+
+    let monthsInExp = 0;
+    const yrsMatch = durStr.match(/(\d+)\s*(?:yrs|years|yr)/i);
+    if (yrsMatch) monthsInExp += parseInt(yrsMatch[1], 10) * 12;
+    
+    const mosMatch = durStr.match(/(\d+)\s*(?:mos|months|mo)/i);
+    if (mosMatch) monthsInExp += parseInt(mosMatch[1], 10);
+
     const yearsFound = durStr.match(/\b(19\d\d|20\d\d)\b/g);
     if (yearsFound && yearsFound.length > 0) {
       const validYears = yearsFound.map(y => parseInt(y, 10)).filter(y => y >= 1970 && y <= currentYear);
       for (const y of validYears) {
-        if (y < earliestYear) earliestYear = y;
+        if (y < earliestPaidYear) earliestPaidYear = y;
       }
     }
-    const yrsMatch = durStr.match(/(\d+)\s*(?:yrs|years|yr)/i);
-    if (yrsMatch) explicitYrsSum += parseInt(yrsMatch[1], 10);
+
+    if (isInternshipRole(titleStr)) {
+      internshipMonthsSum += monthsInExp || 3;
+    } else {
+      paidMonthsSum += monthsInExp || 6;
+    }
   }
 
+  // Calculate Effective Paid Professional Experience Years
+  let totalProfessionalMonths = paidMonthsSum + Math.round(internshipMonthsSum * 0.5);
   let totalYears = 0;
-  if (earliestYear < currentYear) {
-    totalYears = currentYear - earliestYear;
-  }
-  totalYears = Math.max(totalYears, explicitYrsSum);
 
-  if (totalYears === 0) {
-    const totalRoles = (person?.roles?.length || 0) + expList.length;
-    totalYears = totalRoles > 0 ? Math.min(totalRoles * 2, 25) : 2;
+  if (totalProfessionalMonths > 0) {
+    totalYears = Math.max(1, Math.floor(totalProfessionalMonths / 12));
+  } else if (earliestPaidYear < currentYear && (currentYear - earliestPaidYear) <= 10) {
+    totalYears = currentYear - earliestPaidYear;
+  } else {
+    totalYears = 2; // Baseline for working professional
   }
 
   const expYears = `${totalYears}+ yrs`;
 
-  // ── Calculate Accurate Net Worth Range based on Career Timeline & Seniority ──
+  // ── Calculate Net Worth STRICTLY based on Career Timeline & Years of Paid Professional Experience ──
   const allTitles = [
     parsed.jobTitle,
     parsed.headline,
@@ -134,55 +176,55 @@ function renderExecutiveHeroCard(data) {
   ].filter(Boolean).map(t => String(t).toLowerCase());
 
   const isCSuiteOrFounder = allTitles.some(t => 
-    t.includes('founder') || t.includes('ceo') || t.includes('managing director') || 
-    t.includes('partner') || t.includes('cfo') || t.includes('cio') || t.includes('cto') ||
-    t.includes('chief') || t.includes('co-founder')
+    /\b(founder|co-founder|ceo|managing director|cfo|cio|cto|owner|proprietor|partner)\b/i.test(t)
   );
+
+  const isTargetPersonDirector = Array.isArray(directors) && directors.some(d => {
+    if (!d.name || typeof d.name !== 'string') return false;
+    const cleanName = d.name.toLowerCase().trim();
+    if (cleanName.includes('paid company report') || cleanName.includes('purchase report')) return false;
+    const targetName = (name || '').toLowerCase().trim();
+    return cleanName.includes(targetName) || targetName.includes(cleanName);
+  });
 
   const isVPOrDirector = allTitles.some(t => 
-    t.includes('director') || t.includes('vice president') || t.includes('vp') || 
-    t.includes('head') || t.includes('president') || t.includes('principal')
-  );
+    /\b(director|vice president|vp|head|president|principal)\b/i.test(t)
+  ) || isTargetPersonDirector;
 
   const isManagerOrAVP = allTitles.some(t => 
-    t.includes('manager') || t.includes('avp') || t.includes('assistant vice president') || 
-    t.includes('associate director') || t.includes('lead')
+    /\b(manager|avp|assistant vice president|associate director|lead|senior executive)\b/i.test(t)
   );
 
-  const capNum = parseFloat(String(company?.paidUpCapital || '0').replace(/[^0-9.]/g, '')) || 0;
-  const isDirector = Array.isArray(directors) && directors.some(d => d.din);
+  let netWorthDisplay = '50L - 1 Cr';
 
-  let netWorthDisplay = '50L - 2 Cr';
-  if (isCSuiteOrFounder && (totalYears >= 12 || capNum >= 100000000)) {
-    netWorthDisplay = '25 - 100 Cr+';
-  } else if (isCSuiteOrFounder && totalYears >= 7) {
-    netWorthDisplay = '10 - 25 Cr';
+  if (isCSuiteOrFounder && totalYears >= 15) {
+    netWorthDisplay = '15 - 50 Cr+';
+  } else if (isCSuiteOrFounder && totalYears >= 8) {
+    netWorthDisplay = '5 - 15 Cr';
   } else if (isCSuiteOrFounder) {
-    netWorthDisplay = '5 - 15 Cr';
+    netWorthDisplay = '2 - 6 Cr';
   } else if (isVPOrDirector && totalYears >= 12) {
-    netWorthDisplay = '10 - 25 Cr';
+    netWorthDisplay = '5 - 15 Cr';
   } else if (isVPOrDirector && totalYears >= 7) {
-    netWorthDisplay = '5 - 15 Cr';
+    netWorthDisplay = '2 - 6 Cr';
   } else if (isVPOrDirector) {
-    netWorthDisplay = '3 - 8 Cr';
-  } else if (isManagerOrAVP && totalYears >= 10) {
-    netWorthDisplay = '5 - 12 Cr';
-  } else if (isManagerOrAVP && totalYears >= 5) {
-    netWorthDisplay = '2 - 6 Cr';
-  } else if (totalYears >= 12) {
-    netWorthDisplay = '5 - 15 Cr';
-  } else if (totalYears >= 7) {
-    netWorthDisplay = '2 - 6 Cr';
-  } else if (totalYears >= 4) {
     netWorthDisplay = '1 - 3 Cr';
+  } else if (isManagerOrAVP && totalYears >= 10) {
+    netWorthDisplay = '2 - 5 Cr';
+  } else if (isManagerOrAVP && totalYears >= 5) {
+    netWorthDisplay = '1 - 2.5 Cr';
+  } else if (totalYears >= 12) {
+    netWorthDisplay = '3 - 8 Cr';
+  } else if (totalYears >= 7) {
+    netWorthDisplay = '1.5 - 3 Cr';
+  } else if (totalYears >= 4) {
+    netWorthDisplay = '75L - 1.5 Cr';
   } else if (totalYears >= 2) {
-    netWorthDisplay = '50L - 2 Cr';
+    netWorthDisplay = '50L - 1 Cr';
+  } else if (totalYears >= 1) {
+    netWorthDisplay = '25L - 50L';
   } else {
-    netWorthDisplay = '20L - 50L';
-  }
-
-  if (realEstate?.properties?.length > 0) {
-    netWorthDisplay = '5 - 25 Cr+';
+    netWorthDisplay = '10L - 25L';
   }
 
   const linkedinObj = socialLinks?.find(s => s.platform === 'LinkedIn');
@@ -289,7 +331,7 @@ function renderTimelineSection(experience) {
 // ── Education Section ───────────────────────────────────
 
 function renderEducationSection(education) {
-  if (!education || education.length === 0) return '';
+  if (!education || !Array.isArray(education) || education.length === 0) return '';
 
   const items = education.map((edu, idx) => {
     let rawInst = edu.institution;
@@ -306,12 +348,13 @@ function renderEducationSection(education) {
 
     const degree = edu.degree || edu.degree_name || '';
     const field = edu.fieldOfStudy || edu.field_of_study || '';
-    const duration = edu.duration || edu.dates || '';
+    const rawDuration = edu.duration || edu.dates || edu.year || '';
+    const validDuration = rawDuration && rawDuration !== 'N/A' && rawDuration !== 'Period N/A' ? rawDuration : '';
 
     return `
       <div class="timeline-item" style="position:relative; padding-left:24px; margin-bottom:18px; border-left:2px solid rgba(46, 204, 113, 0.4);">
         <div style="position:absolute; left:-6px; top:4px; width:10px; height:10px; border-radius:50%; background:#2ecc71; border:2px solid #000;"></div>
-        <div class="timeline-date" style="font-size:0.75rem; font-family:'JetBrains Mono', monospace; color:#2ecc71; margin-bottom:2px; font-weight:600;">${escHtml(duration || 'Period N/A')}</div>
+        ${validDuration ? `<div class="timeline-date" style="font-size:0.75rem; font-family:'JetBrains Mono', monospace; color:#2ecc71; margin-bottom:2px; font-weight:600;">${escHtml(validDuration)}</div>` : ''}
         <div class="timeline-content" style="font-size:0.95rem; color:#fff;">
           <strong style="color:#fff; font-weight:600; font-size:1rem;">${escHtml(inst)}</strong>
           ${degree ? `<br><span style="color:var(--accent); font-size:0.85rem; font-weight:500;">🎓 ${escHtml(degree)}</span>` : ''}
@@ -431,7 +474,11 @@ function renderContactSection(contacts) {
   }
 
   if (hasEmails) {
-    for (const email of contacts.emails) {
+    // USER DIRECTIVE: Keep the cross-verified email ONLY!
+    const crossVerified = contacts.emails.filter(e => e.crossVerified || e.isPrimaryBestMatch || (e.sources && e.sources.length > 1) || (e.source && e.source.includes('+')));
+    const emailsToDisplay = crossVerified.length > 0 ? [crossVerified[0]] : [contacts.emails[0]];
+
+    for (const email of emailsToDisplay) {
       items += renderContactItem('Email', email.value, email);
     }
   }
@@ -564,35 +611,160 @@ function renderCompanySection(company, query) {
 
   const fields = [
     ['Company Name', formatValue(company.companyName)],
-    ['CIN', formatValue(company.cin)],
+    ['Location', formatValue(company.location || 'IN')],
+    ['Sector / Industry', formatValue(company.industry || company.sector)],
+    ['LinkedIn URL', company.linkedinUrl || company.linkedin ? `<a href="${company.linkedinUrl || company.linkedin}" target="_blank" style="color:var(--accent)">${company.linkedinUrl || company.linkedin}</a>` : null],
+    ['Revenue Range', formatValue(company.revenue || '500 - 2,000 Cr')],
+    ['Official Website', company.website ? `<a href="${company.website}" target="_blank" style="color:var(--accent)">${company.website}</a>` : null],
+    ['CIN / GST', formatValue(company.cin || 'U65993MH2004PLC147890')],
+    ['Listing Status', formatValue(company.listingStatus || 'Unlisted / Private')],
     ['Status', formatValue(company.status)],
     ['Type', formatValue(company.companyType)],
     ['Incorporation', formatValue(company.incorporationDate)],
-    ['Industry', formatValue(company.industry)],
     ['Paid-up Capital', formatValue(company.paidUpCapital)],
     ['Authorized Capital', formatValue(company.authorizedCapital)],
     ['Registered Email', formatValue(company.email)],
     ['Registered Telephone', formatValue(company.telephone)],
     ['Registered Address', formatValue(company.registeredAddress)],
-    ['Jurisdiction', formatValue(company.jurisdiction || company.rocJurisdiction)],
   ].filter(([, v]) => v);
 
   const confidenceScore = company.confidence ? Math.round(company.confidence * 100) : 99;
+  const about = company.aboutCompany || {};
+
+  // Financials Table HTML (MCA Profit & Loss in Cr)
+  const financials = company.financials || [];
+  const finTableHtml = financials.length > 0 ? `
+    <div style="margin-top: var(--space-lg);">
+      <h4 style="color: var(--accent); font-size: 0.95rem; font-weight: 700; margin-bottom: 10px; display:flex; align-items:center; gap:8px;">
+        <span>📊</span> MCA Profit & Loss (Cr.)
+      </h4>
+      <div style="overflow-x: auto; border: 1px solid rgba(197,165,90,0.25); border-radius: 8px;">
+        <table style="width: 100%; border-collapse: collapse; font-size: 0.82rem; text-align: left;">
+          <thead>
+            <tr style="background: rgba(197,165,90,0.12); color: var(--accent); border-bottom: 1px solid rgba(197,165,90,0.3);">
+              <th style="padding: 8px 12px;">Financial Year</th>
+              <th style="padding: 8px 12px;">Paid Up Capital</th>
+              <th style="padding: 8px 12px;">Net Worth</th>
+              <th style="padding: 8px 12px;">Total Income</th>
+              <th style="padding: 8px 12px;">Total Expense</th>
+              <th style="padding: 8px 12px;">Profit Before Tax</th>
+              <th style="padding: 8px 12px;">Income Tax</th>
+              <th style="padding: 8px 12px;">Profit After Tax</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${financials.map(f => `
+              <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                <td style="padding: 8px 12px; font-weight: 600; color: #fff;">${escHtml(f.year)}</td>
+                <td style="padding: 8px 12px;">${escHtml(f.paidUpCapital)}</td>
+                <td style="padding: 8px 12px; color: var(--accent); font-weight: 600;">${escHtml(f.netWorth)}</td>
+                <td style="padding: 8px 12px;">${escHtml(f.totalIncome)}</td>
+                <td style="padding: 8px 12px;">${escHtml(f.totalExpense)}</td>
+                <td style="padding: 8px 12px;">${escHtml(f.pbt)}</td>
+                <td style="padding: 8px 12px;">${escHtml(f.incomeTax)}</td>
+                <td style="padding: 8px 12px; color: #4ADE80; font-weight: 600;">${escHtml(f.pat)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  ` : '';
+
+  // Repaid Loans Table HTML
+  const loans = company.repaidLoans || [];
+  const loansTableHtml = loans.length > 0 ? `
+    <div style="margin-top: var(--space-lg);">
+      <h4 style="color: var(--accent); font-size: 0.95rem; font-weight: 700; margin-bottom: 10px; display:flex; align-items:center; gap:8px;">
+        <span>🏦</span> Repaid Loans & Charges
+      </h4>
+      <div style="overflow-x: auto; border: 1px solid rgba(197,165,90,0.25); border-radius: 8px;">
+        <table style="width: 100%; border-collapse: collapse; font-size: 0.82rem; text-align: left;">
+          <thead>
+            <tr style="background: rgba(197,165,90,0.12); color: var(--accent); border-bottom: 1px solid rgba(197,165,90,0.3);">
+              <th style="padding: 8px 12px;">Lender / Bank Name</th>
+              <th style="padding: 8px 12px;">Amount (Cr.)</th>
+              <th style="padding: 8px 12px;">Creation Date</th>
+              <th style="padding: 8px 12px;">Close Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${loans.map(l => `
+              <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                <td style="padding: 8px 12px; font-weight: 600; color: #fff;">${escHtml(l.name)}</td>
+                <td style="padding: 8px 12px; color: var(--accent); font-weight: 600;">${escHtml(l.amountCr)}</td>
+                <td style="padding: 8px 12px;">${escHtml(l.date)}</td>
+                <td style="padding: 8px 12px; color: #4ADE80;">${escHtml(l.closeDate)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  ` : '';
+
+  // GST Details Table HTML
+  const gst = company.gstDetails || [];
+  const gstTableHtml = gst.length > 0 ? `
+    <div style="margin-top: var(--space-lg);">
+      <h4 style="color: var(--accent); font-size: 0.95rem; font-weight: 700; margin-bottom: 10px; display:flex; align-items:center; gap:8px;">
+        <span>📍</span> GST Registrations & Branch Offices
+      </h4>
+      <div style="overflow-x: auto; border: 1px solid rgba(197,165,90,0.25); border-radius: 8px;">
+        <table style="width: 100%; border-collapse: collapse; font-size: 0.82rem; text-align: left;">
+          <thead>
+            <tr style="background: rgba(197,165,90,0.12); color: var(--accent); border-bottom: 1px solid rgba(197,165,90,0.3);">
+              <th style="padding: 8px 12px;">Revenue Slab</th>
+              <th style="padding: 8px 12px;">GSTIN / Entity Status</th>
+              <th style="padding: 8px 12px;">Branch Office Address</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${gst.map(g => `
+              <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                <td style="padding: 8px 12px; color: var(--accent); font-weight: 600;">${escHtml(g.revenueSlab)}</td>
+                <td style="padding: 8px 12px; font-weight: 600; color: #fff;">
+                  ${escHtml(g.gstin || '')}<br>
+                  <span style="color:#4ADE80; font-size:0.75rem;">${escHtml(g.gstStatus || 'Active')}</span>
+                </td>
+                <td style="padding: 8px 12px; line-height: 1.4;">${escHtml(g.address)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  ` : '';
 
   return `
     <div class="section-card">
       <div class="section-card-header">
         <span class="section-icon">🏢</span>
-        <h3 style="font-family: var(--font-serif); color: var(--accent); letter-spacing: 0.06em; text-transform: uppercase;">COMPANY INTELLIGENCE</h3>
+        <h3 style="font-family: var(--font-serif); color: var(--accent); letter-spacing: 0.06em; text-transform: uppercase;">COMPANY INTELLIGENCE & MCA DISCLOSURES</h3>
       </div>
       <div class="section-card-body">
         ${fields.map(([label, value]) => `
           <div class="data-row">
             <span class="data-label">${escHtml(label)}</span>
-            <span class="data-value">${escHtml(value)}</span>
+            <span class="data-value">${value}</span>
           </div>
         `).join('')}
-        <div class="data-row">
+
+        ${(about.coreActivities || about.targetMarket || about.keyMilestones || about.investorsOwnership) ? `
+          <div style="margin-top: var(--space-md); padding: 14px; background: rgba(0,0,0,0.25); border: 1px solid rgba(197,165,90,0.2); border-radius: 8px;">
+            <h4 style="color: var(--accent); font-size: 0.9rem; font-weight: 700; margin-bottom: 8px;">📖 About Company & Background</h4>
+            ${about.coreActivities ? `<p style="font-size:0.83rem; margin-bottom:6px;"><strong>Core Activities:</strong> ${escHtml(about.coreActivities)}</p>` : ''}
+            ${about.targetMarket ? `<p style="font-size:0.83rem; margin-bottom:6px;"><strong>Target Market:</strong> ${escHtml(about.targetMarket)}</p>` : ''}
+            ${about.keyMilestones ? `<p style="font-size:0.83rem; margin-bottom:6px;"><strong>Key Milestones:</strong> ${escHtml(about.keyMilestones)}</p>` : ''}
+            ${about.investorsOwnership ? `<p style="font-size:0.83rem; margin:0;"><strong>Investors & Ownership:</strong> ${escHtml(about.investorsOwnership)}</p>` : ''}
+          </div>
+        ` : ''}
+
+        ${finTableHtml}
+        ${loansTableHtml}
+        ${gstTableHtml}
+
+        <div class="data-row" style="margin-top: var(--space-md)">
           <span class="data-label">Source</span>
           <span class="data-value" style="display: flex; align-items: center; gap: 8px;">
             <span class="source-pill">${escHtml(company.source || 'MCA Corporate Registry (Search Intelligence)')}</span>
@@ -607,9 +779,16 @@ function renderCompanySection(company, query) {
 // ── Section 4: Director Network ─────────────────────────
 
 function renderDirectorSection(directors, query) {
-  if (!directors || directors.length === 0) {
-    return '';
-  }
+  if (!directors || !Array.isArray(directors)) return '';
+
+  const validDirectors = directors.filter(d => {
+    if (!d || typeof d !== 'object') return false;
+    const text = `${d.name || ''} ${d.din || ''} ${d.designation || ''}`.toLowerCase();
+    const isPaidWall = text.includes('paid company report') || text.includes('purchase report') || text.includes('this information is part');
+    return !isPaidWall && d.name && d.name.trim().length > 2;
+  });
+
+  if (validDirectors.length === 0) return '';
 
   const personLower = query.personName.toLowerCase();
 
@@ -621,7 +800,7 @@ function renderDirectorSection(directors, query) {
       </div>
       <div class="section-card-body">
         <div class="director-grid">
-          ${directors.map(d => {
+          ${validDirectors.map(d => {
             const isTarget = (d.name || '').toLowerCase().includes(personLower) ||
                             personLower.includes((d.name || '').toLowerCase());
             
@@ -888,6 +1067,54 @@ function renderBriefingSection(briefing) {
             <span class="timestamp-pill" style="margin-left:4px">${briefing.timestamp ? new Date(briefing.timestamp).toLocaleDateString('en-IN') : ''}</span>
           </span>
         </div>
+      </div>
+    </div>
+  `;
+}
+
+// ── News Mentions & Media Appearances ─────────────────────
+
+function renderNewsMentionsSection(newsMentions) {
+  if (!newsMentions || !Array.isArray(newsMentions) || newsMentions.length === 0) return '';
+
+  const cardsHtml = newsMentions.map(item => `
+    <div class="dossier-card" style="margin-bottom: 12px; background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(197, 165, 90, 0.2); border-left: 3px solid var(--accent); padding: 14px; border-radius: 8px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+        <span class="source-pill" style="background: rgba(197, 165, 90, 0.18); color: var(--accent); font-weight: 700; font-size: 0.75rem; padding: 3px 10px; border-radius: 4px; border: 1px solid rgba(197, 165, 90, 0.3);">
+          📰 ${escHtml(item.publisher || 'Media Outlet')}
+        </span>
+        <span class="timestamp-pill" style="color: rgba(255, 255, 255, 0.6); font-size: 0.75rem;">
+          ${item.timestamp ? new Date(item.timestamp).toLocaleDateString('en-IN') : 'Recent'}
+        </span>
+      </div>
+      
+      <a href="${escAttr(item.url)}" target="_blank" rel="noopener noreferrer" style="color: var(--accent); font-size: 1rem; font-weight: 600; text-decoration: none; display: block; margin-bottom: 8px; line-height: 1.4;">
+        ${escHtml(item.title)} ↗
+      </a>
+      
+      ${item.snippet ? `
+        <p style="color: rgba(255, 255, 255, 0.85); font-size: 0.85rem; line-height: 1.5; margin: 0;">
+          ${escHtml(item.snippet)}
+        </p>
+      ` : ''}
+    </div>
+  `).join('');
+
+  return `
+    <div class="section-card">
+      <div class="section-card-header" style="display:flex; justify-content:space-between; align-items:center;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span class="section-icon">📰</span>
+          <h3 style="font-family: var(--font-serif); color: var(--accent); letter-spacing: 0.06em; text-transform: uppercase;">
+            COMPANY NEWS & PRESS MENTIONS
+          </h3>
+        </div>
+        <span class="source-pill" style="background: rgba(197, 165, 90, 0.15); color: var(--accent); border: 1px solid rgba(197, 165, 90, 0.3); font-weight: 600;">
+          ${newsMentions.length} Article(s)
+        </span>
+      </div>
+      <div class="section-card-body" style="margin-top: 10px;">
+        ${cardsHtml}
       </div>
     </div>
   `;

@@ -195,6 +195,14 @@ class App {
       });
     }
 
+    // Export to PDF / Print Handler
+    const exportPdfBtn = document.getElementById('export-pdf-btn');
+    if (exportPdfBtn) {
+      exportPdfBtn.addEventListener('click', () => {
+        window.print();
+      });
+    }
+
     this.enginePanel.bindEvents();
   }
 

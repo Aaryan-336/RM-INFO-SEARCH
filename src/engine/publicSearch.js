@@ -10,6 +10,7 @@ import { CONFIDENCE, ATTRIBUTION, computeFinalConfidence } from '../utils/confid
 import { callGroqWithFallback } from '../utils/groq.js';
 import { parsePublicLinkedInHtml } from './linkedinParser.js';
 import { isApifyLinkedInConfigured, scrapeLinkedInProfileWithApify } from './linkedinApify.js';
+import { isValidExecutiveMobile, formatExecutiveMobile } from './mobileExtractor.js';
 
 const CONTACT_PAGE_PATHS = [
   '/about', '/about-us', '/team', '/our-team', '/leadership',
@@ -158,9 +159,10 @@ export async function publicSearch(identity, logger) {
     const hasPersonalEmail = results.emails.some(e => isPersonalEmail(e.value, identity));
 
     if (!hasPersonalEmail) {
-      logger.running('Public Search', 'No personal emails found. Generating and verifying name-based email candidates...');
-      const domain = identity.company.possibleDomains[0]; // Primary domain (e.g. dalal-broacha.com)
-      if (domain) {
+      logger.running('Public Search', 'Generating and verifying candidate emails across ALL discovered company domains...');
+      const targetDomains = [...new Set(identity.company.possibleDomains || [])].slice(0, 4);
+      for (const domain of targetDomains) {
+        if (!domain) continue;
         const candidates = generateEmailCandidates(identity, domain);
         for (const candidate of candidates) {
           logger.running('Public Search', `Verifying candidate email existence: ${candidate}`);
@@ -168,15 +170,15 @@ export async function publicSearch(identity, logger) {
           if (exists) {
             results.emails.push({
               value: candidate,
-              source: 'Search Verification',
+              source: `Search Verification (${domain})`,
               sourceType: 'Search Verified Candidate',
               confidence: CONFIDENCE.COMPANY_WEBSITE,
               attribution: ATTRIBUTION.DIRECT_MATCH,
               timestamp: new Date().toISOString(),
               personMentioned: true,
             });
-            logger.success('Public Search', `Email candidate verified: ${candidate}`);
-            break; // Stop at first verified candidate
+            logger.success('Public Search', `Email candidate verified for domain ${domain}: ${candidate}`);
+            break; // Found verified candidate for this domain
           }
         }
       }
@@ -555,10 +557,13 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
 
         if (Array.isArray(apifyResult.skills)) results.skills = apifyResult.skills;
         if (Array.isArray(apifyResult.emails)) results.emails.push(...apifyResult.emails);
-        if (Array.isArray(apifyResult.related_profiles)) results.relatedProfiles = apifyResult.related_profiles;
-
+        const hasExpOrEdu = (apifyResult.experience && apifyResult.experience.length > 0) || (apifyResult.education && apifyResult.education.length > 0);
         logger.success('Public Search', `LinkedIn: Extracted Hero Header & profile details via Apify Scraper (${apifyResult.experience?.length || 0} experience, ${apifyResult.education?.length || 0} education entries)`);
-        return; // Complete — Apify Scraper provided profile data!
+        
+        if (hasExpOrEdu) {
+          return; // Complete — Apify Scraper provided rich profile data!
+        }
+        logger.running('Public Search', 'Apify returned minimal profile details — running browser & AI extraction fallback for complete history...');
       }
     } catch (apErr) {
       logger.warning('Public Search', `Apify LinkedIn extraction notice: ${apErr.message}`);
@@ -748,15 +753,21 @@ async function scrapeLinkedIn(page, identity, results, allSnippets, logger) {
 
       if (domData.education && domData.education.length > 0) {
         logger.success('Public Search', `LinkedIn DOM: Found ${domData.education.length} education entries`);
-        results.education = domData.education.map(edu => ({
-          institution: edu.institution,
-          degree: edu.degree || '',
-          fieldOfStudy: edu.fieldOfStudy || '',
-          duration: edu.duration || '',
-          source: 'LinkedIn (Authenticated DOM)',
-          confidence: CONFIDENCE.COMPANY_WEBSITE,
-          timestamp: new Date().toISOString(),
-        }));
+        for (const edu of domData.education) {
+          const instName = (edu.institution || '').trim().toLowerCase();
+          const degName = (edu.degree || '').trim().toLowerCase();
+          if (!results.education.some(e => (e.institution || '').trim().toLowerCase() === instName && (e.degree || '').trim().toLowerCase() === degName)) {
+            results.education.push({
+              institution: edu.institution,
+              degree: edu.degree || '',
+              fieldOfStudy: edu.fieldOfStudy || '',
+              duration: edu.duration || '',
+              source: 'LinkedIn (Authenticated DOM)',
+              confidence: CONFIDENCE.COMPANY_WEBSITE,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        }
       }
 
       // Extract headline/name from profile top section
@@ -1164,8 +1175,8 @@ async function extractFromPage(page, sourceUrl, identity, results) {
     const allPhones = [...new Set([...mobileMatches, ...landlineMatches])];
 
     for (const phone of allPhones) {
-      if (isBlacklistedNumber(phone)) continue;
-      const cleaned = phone.replace(/[\s\-().]/g, '');
+      if (isBlacklistedNumber(phone) || !isValidExecutiveMobile(phone)) continue;
+      const formatted = formatExecutiveMobile(phone);
 
       // Compute attribution based on proximity
       const attribution = computeProximityAttribution(text, phone, namePositions, identity, personMentioned);
@@ -1173,7 +1184,7 @@ async function extractFromPage(page, sourceUrl, identity, results) {
       const finalConf = computeFinalConfidence(sourceConf, attribution);
 
       results.phones.push({
-        value: cleaned,
+        value: formatted,
         source: sourceUrl,
         sourceType: 'Company Website',
         confidence: finalConf,
@@ -1956,6 +1967,26 @@ function normalizeLinkedInUrl(url) {
   return null;
 }
 
+/**
+ * Checks if a hostname or domain represents a non-production, UAT, preprod, or demo website
+ */
+export function isNonProductionDomain(domainOrUrl) {
+  if (!domainOrUrl || typeof domainOrUrl !== 'string') return false;
+  const str = domainOrUrl.toLowerCase();
+  const nonProdPatterns = [
+    'preprod.', 'preprod-', 'pre-prod.', 'pre-prod-', 'preproduction',
+    'uat.', 'uat-', 'uat1.', 'uat2.',
+    'demo.', 'demo-', 'demov2.',
+    'staging.', 'staging-', 'stage.', 'stage-', 'stg.', 'stg-',
+    'dev.', 'dev-', 'development.',
+    'test.', 'test-', 'testing.',
+    'qa.', 'qa-', 'qastg.', 'qatest.',
+    'sandbox.', 'sandbox-',
+    'temp.', 'tmp.', 'beta.', 'draft.'
+  ];
+  return nonProdPatterns.some(pat => str.includes(pat));
+}
+
 // ─── Company Official Domain Discovery ─────────────────────
 
 async function discoverOfficialDomain(page, identity, logger) {
@@ -1972,6 +2003,18 @@ async function discoverOfficialDomain(page, identity, logger) {
     const domains = await page.evaluate(() => {
       const links = document.querySelectorAll('a.result__url, a.result__a');
       const list = [];
+      const nonProdKeywords = [
+        'preprod.', 'preprod-', 'pre-prod.', 'pre-prod-', 'preproduction',
+        'uat.', 'uat-', 'uat1.', 'uat2.',
+        'demo.', 'demo-', 'demov2.',
+        'staging.', 'staging-', 'stage.', 'stage-', 'stg.', 'stg-',
+        'dev.', 'dev-', 'development.',
+        'test.', 'test-', 'testing.',
+        'qa.', 'qa-', 'qastg.', 'qatest.',
+        'sandbox.', 'sandbox-',
+        'temp.', 'tmp.', 'beta.', 'draft.'
+      ];
+
       for (const a of links) {
         let href = a.getAttribute('href') || '';
         if (href.includes('uddg=')) {
@@ -1983,7 +2026,7 @@ async function discoverOfficialDomain(page, identity, logger) {
           try {
             const urlObj = new URL(href);
             const host = urlObj.hostname.toLowerCase();
-            // Filter out directories and social media websites
+            // Filter out directories, social media websites, and PREPROD/UAT/DEMO subdomains
             const directories = [
               'duckduckgo.com', 'zaubacorp.com', 'tofler.in', 'linkedin.com', 'facebook.com', 
               'twitter.com', 'x.com', 'instagram.com', 'youtube.com', 'wikipedia.org', 
@@ -1993,7 +2036,9 @@ async function discoverOfficialDomain(page, identity, logger) {
               'google.com', 'play.google.com', 'chatgpt.com', 'terrellowens.com'
             ];
             const isDirectory = directories.some(d => host === d || host.endsWith('.' + d));
-            if (!isDirectory) {
+            const isNonProd = nonProdKeywords.some(pat => host.includes(pat));
+
+            if (!isDirectory && !isNonProd) {
               let domain = host.replace(/^www\./, '');
               list.push(domain);
             }
@@ -2003,10 +2048,13 @@ async function discoverOfficialDomain(page, identity, logger) {
       return list;
     });
 
-    logger.warning('Public Search', `Domain discovery debug: query="${query}" linksFound=${domains?.length} list=${JSON.stringify(domains)}`);
+    // Clean any non-production domains from final list
+    const cleanDomains = (domains || []).filter(d => !isNonProductionDomain(d));
 
-    if (domains && domains.length > 0) {
-      return domains[0]; // Return the first organic domain found
+    logger.warning('Public Search', `Domain discovery debug: query="${query}" linksFound=${cleanDomains.length} list=${JSON.stringify(cleanDomains)}`);
+
+    if (cleanDomains && cleanDomains.length > 0) {
+      return cleanDomains[0]; // Return the first organic production domain found
     }
   } catch (err) {
     logger.warning('Public Search', `Domain discovery search failed: ${err.message}`);

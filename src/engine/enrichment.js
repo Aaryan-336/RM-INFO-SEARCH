@@ -3,7 +3,7 @@
 // Only triggered when public search + OCR didn't find phone or email
 
 import { CONFIDENCE, ATTRIBUTION } from '../utils/confidence.js';
-import { tryBrightDataEnrichment } from './brightdata.js';
+import { tryLusha } from './lusha.js';
 
 export async function enrichContacts(identity, existingContacts, logger) {
   const start = Date.now();
@@ -13,25 +13,25 @@ export async function enrichContacts(identity, existingContacts, logger) {
   const hasEmail = existingContacts.emails && existingContacts.emails.length > 0;
   const hasPhone = existingContacts.phones && existingContacts.phones.length > 0;
 
-  if (hasEmail && hasPhone && !process.env.BRIGHTDATA_API_KEY) {
+  if (hasEmail && hasPhone && !process.env.LUSHA_API_KEY && !process.env.APOLLO_API_KEY) {
     logger.skipped('Contact Enrichment', 'Sufficient contacts found from public sources — skipping enrichment');
     return results;
   }
 
   logger.running('Contact Enrichment', 'Executing contact & profile enrichment cascade...');
 
-  // Cascade through providers (Bright Data prioritized first when configured)
+  // Cascade through providers (Hunter.io prioritized #1 as primary email source)
   const providers = [
-    { name: 'Bright Data API', fn: tryBrightDataEnrichment, keyEnv: 'BRIGHTDATA_API_KEY', confidence: CONFIDENCE.BRIGHTDATA || 0.95 },
+    { name: 'Hunter.io API (Primary Email Source)', fn: tryHunter, keyEnv: 'HUNTER_API_KEY', confidence: CONFIDENCE.HUNTER || 0.98 },
+    { name: 'Lusha API', fn: tryLusha, keyEnv: 'LUSHA_API_KEY', confidence: CONFIDENCE.LUSHA || 0.90 },
     { name: 'Apollo', fn: tryApollo, keyEnv: 'APOLLO_API_KEY', confidence: CONFIDENCE.APOLLO },
     { name: 'Apify Google Search', fn: tryApify, keyEnv: 'APIFY_TOKEN', confidence: CONFIDENCE.PUBLIC_DIRECTORY },
-    { name: 'Hunter.io', fn: tryHunter, keyEnv: 'HUNTER_API_KEY', confidence: CONFIDENCE.HUNTER },
     { name: 'RocketReach', fn: tryRocketReach, keyEnv: 'ROCKETREACH_API_KEY', confidence: CONFIDENCE.ROCKETREACH },
     { name: 'People Data Labs', fn: tryPDL, keyEnv: 'PDL_API_KEY', confidence: CONFIDENCE.PDL },
   ];
 
   for (const provider of providers) {
-    const apiKey = process.env[provider.keyEnv];
+    const apiKey = process.env[provider.keyEnv] || (provider.name === 'Lusha API' ? process.env.Lusha_API : null);
     if (!apiKey) {
       logger.skipped('Contact Enrichment', `${provider.name}: No API key configured — skipping`);
       continue;
@@ -178,35 +178,48 @@ async function tryApollo(identity, apiKey, confidence, logger) {
 
 // ─── Hunter.io (Free: 25 searches/month) ──────────────────────
 
-async function tryHunter(identity, apiKey, confidence) {
-  // First try email finder
-  const finderUrl = `https://api.hunter.io/v2/email-finder?domain=${identity.company.possibleDomains[0]}&first_name=${encodeURIComponent(identity.normalized.firstName)}&last_name=${encodeURIComponent(identity.normalized.lastName)}&api_key=${apiKey}`;
+async function tryHunter(identity, apiKey, confidence = CONFIDENCE.HUNTER || 0.98) {
+  const firstName = identity?.normalized?.firstName || '';
+  const lastName = identity?.normalized?.lastName || '';
+  const domains = [...new Set(identity?.company?.possibleDomains || [])];
 
-  const res = await fetch(finderUrl, { signal: AbortSignal.timeout(8000) });
-  if (!res.ok) return null;
+  for (const domain of domains) {
+    if (!domain) continue;
+    const cleanDomain = domain.replace(/^www\./i, '').toLowerCase().trim();
 
-  const data = await res.json();
-  if (!data.data || !data.data.email) return null;
+    try {
+      const finderUrl = `https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(cleanDomain)}&first_name=${encodeURIComponent(firstName)}&last_name=${encodeURIComponent(lastName)}&api_key=${apiKey}`;
+      const res = await fetch(finderUrl, { signal: AbortSignal.timeout(8000) });
+      if (!res.ok) continue;
 
-  return {
-    email: {
-      value: data.data.email,
-      source: 'Hunter.io',
-      sourceType: 'Enrichment Provider (Hunter.io)',
-      confidence: data.data.score ? data.data.score / 100 : confidence,
-      attribution: ATTRIBUTION.ENRICHMENT_API,
-      timestamp: new Date().toISOString(),
-    },
-    phone: null,
-    profile: {
-      position: data.data.position,
-      linkedin: data.data.linkedin,
-      twitter: data.data.twitter,
-      source: 'Hunter.io',
-      confidence,
-      timestamp: new Date().toISOString(),
-    },
-  };
+      const data = await res.json();
+      if (data?.data && data.data.email) {
+        const emailScore = data.data.score ? Math.max(0.95, data.data.score / 100) : 0.98;
+        return {
+          email: {
+            value: data.data.email.toLowerCase(),
+            source: `Hunter.io API (${cleanDomain})`,
+            sourceType: 'Primary Email Provider (Hunter.io API)',
+            confidence: emailScore,
+            attribution: ATTRIBUTION.ENRICHMENT_API,
+            isPrimaryBestMatch: true,
+            timestamp: new Date().toISOString(),
+          },
+          phone: null,
+          profile: {
+            position: data.data.position,
+            linkedin: data.data.linkedin,
+            twitter: data.data.twitter,
+            source: 'Hunter.io',
+            confidence: emailScore,
+            timestamp: new Date().toISOString(),
+          },
+        };
+      }
+    } catch {}
+  }
+
+  return null;
 }
 
 // ─── RocketReach ──────────────────────────────────────────────

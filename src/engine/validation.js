@@ -5,6 +5,7 @@
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import { promises as dns } from 'dns';
 import { CONFIDENCE, ATTRIBUTION, computeFinalConfidence, boostConfidence, meetsThreshold } from '../utils/confidence.js';
+import { isValidExecutiveMobile, formatExecutiveMobile } from './mobileExtractor.js';
 
 export async function validateContacts(allContacts, identity, logger) {
   const start = Date.now();
@@ -166,10 +167,25 @@ export async function validateContacts(allContacts, identity, logger) {
     }
   }
 
-  // ── Sort by confidence ────────────────────────────────────
+  // ── Filter to strictly keep ONLY cross-verified email ────────────────────
 
   validated.phones.sort((a, b) => b.confidence - a.confidence);
   validated.emails.sort((a, b) => b.confidence - a.confidence);
+
+  if (validated.emails.length > 0) {
+    // Look for cross-verified emails (found across multiple sources or Hunter + MX Verifier)
+    const crossVerified = validated.emails.filter(e => e.crossVerified || e.sources?.length > 1 || e.isPrimaryBestMatch || e.source?.includes('+'));
+    
+    if (crossVerified.length > 0) {
+      const topCross = crossVerified[0];
+      topCross.crossVerified = true;
+      topCross.isPrimaryBestMatch = true;
+      validated.emails = [topCross];
+    } else {
+      // Fallback: if no multi-source cross-verified email exists, return top verified email
+      validated.emails = [validated.emails[0]];
+    }
+  }
 
   // ── Temporal Consistency Check (MCA vs LinkedIn) ─────────────
   const mcaDirectors = allContacts.mca?.directors || [];
@@ -254,6 +270,10 @@ export function checkTemporalConsistency(mcaDirectors = [], linkedinExperience =
 // ─── Phone Validation (libphonenumber-js) ────────────────────
 
 function validatePhone(raw) {
+  if (!isValidExecutiveMobile(raw)) {
+    return { valid: false };
+  }
+
   try {
     // Try parsing with India as default country
     let phoneNumber = parsePhoneNumberFromString(raw, 'IN');
@@ -386,6 +406,7 @@ function collectEmails(allContacts) {
     emails.push(...allContacts.ocr.contacts.filter(c => c.type === 'email'));
   }
   if (allContacts.enrichment?.emails) emails.push(...allContacts.enrichment.emails);
+  if (allContacts.candidateMxEmails) emails.push(...allContacts.candidateMxEmails);
   if (allContacts.mca?.company?.email) {
     emails.push({
       value: allContacts.mca.company.email,

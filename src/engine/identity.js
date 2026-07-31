@@ -237,5 +237,6 @@ function generateCompanyDomains(company) {
     addDomainExtensions(`${filteredBase}wealth`);
   }
 
-  return [...domains];
+  const nonProdPatterns = ['preprod.', 'preprod-', 'pre-prod.', 'uat.', 'uat-', 'demo.', 'staging.', 'stage.', 'stg.', 'dev.', 'test.', 'qa.', 'sandbox.', 'temp.', 'tmp.', 'beta.'];
+  return [...domains].filter(d => !nonProdPatterns.some(pat => d.toLowerCase().includes(pat)));
 }

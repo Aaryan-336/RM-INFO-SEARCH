@@ -15,9 +15,14 @@ export function renderAffluenseResultsView(data) {
       <!-- Header Bar -->
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:16px;">
         <div>
-          <button id="aff-back-btn" style="background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:6px 14px; border-radius:6px; font-size:13px; cursor:pointer; margin-bottom:8px;">
-            ← New Contact Extraction Test
-          </button>
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+            <button id="aff-back-btn" style="background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:6px 14px; border-radius:6px; font-size:13px; cursor:pointer;">
+              ← New Contact Extraction Test
+            </button>
+            <button id="export-pdf-btn" style="background: linear-gradient(135deg, var(--accent, #d4af37) 0%, #b89443 100%); color: #000; font-weight: 700; font-size: 13px; padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;">
+              <span>📄</span> Export to PDF
+            </button>
+          </div>
           <h2 style="font-size:1.8rem; margin:4px 0; color:var(--accent);">
             Contact Extraction Results: ${query.personName}
           </h2>

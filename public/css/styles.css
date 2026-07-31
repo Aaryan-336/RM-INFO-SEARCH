@@ -1436,3 +1436,112 @@ body {
 .hero-social-link:hover {
   color: var(--accent-light);
 }
+
+/* ── Print / PDF Export Styles (High-Contrast & Clean Layout) ── */
+@media print {
+  @page {
+    margin: 10mm 12mm;
+    size: portrait;
+  }
+
+  body {
+    background: #061e24 !important;
+    color: #f8fafc !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    font-size: 11pt !important;
+  }
+
+  /* Force background colors to print faithfully in dark mode PDF */
+  *, *::before, *::after {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .app-header,
+  .back-btn,
+  .export-pdf-btn,
+  #aff-back-btn,
+  .engine-panel,
+  .engine-toggle-btn,
+  .app-tabs {
+    display: none !important;
+  }
+
+  .results-view,
+  .affluense-results-container {
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: 100% !important;
+  }
+
+  .section-card {
+    background: #0b282e !important;
+    border: 1px solid rgba(197, 165, 90, 0.4) !important;
+    border-radius: 8px !important;
+    margin-bottom: 16px !important;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    box-shadow: none !important;
+  }
+
+  .section-card-header h3 {
+    color: #e5c158 !important;
+    font-size: 1.1rem !important;
+    font-weight: 700 !important;
+  }
+
+  .data-label {
+    color: #94a3b8 !important;
+    font-weight: 600 !important;
+  }
+
+  .data-value {
+    color: #ffffff !important;
+    font-weight: 600 !important;
+  }
+
+  .source-pill, .badge, .timestamp-pill, .validation-pill {
+    border: 1px solid rgba(197, 165, 90, 0.4) !important;
+    color: #e5c158 !important;
+    background: rgba(197, 165, 90, 0.2) !important;
+  }
+
+  /* Table styles for PDF print */
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    background: #071a1f !important;
+  }
+
+  th {
+    background: #11363e !important;
+    color: #f1c40f !important;
+    font-weight: 700 !important;
+    padding: 8px !important;
+    border: 1px solid rgba(197, 165, 90, 0.4) !important;
+  }
+
+  td {
+    color: #ffffff !important;
+    padding: 8px !important;
+    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    font-size: 0.82rem !important;
+  }
+
+  /* Highlight numbers and values in table */
+  td[style*="color: var(--accent)"], td[style*="color: #4ADE80"] {
+    color: #f1c40f !important;
+    font-weight: 700 !important;
+  }
+
+  a {
+    color: #e5c158 !important;
+    text-decoration: underline !important;
+  }
+
+  .dossier-card {
+    background: #0b282e !important;
+    border: 1px solid rgba(197, 165, 90, 0.3) !important;
+  }
+}
